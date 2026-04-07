@@ -91,6 +91,28 @@ User's own `CLAUDE.md` always takes precedence.
 
 ---
 
+## Analyzer (v0.2.0)
+
+Retrospective analysis of every Claude Code session you've ever run. Walks
+`~/.claude/projects/**/*.jsonl`, computes per-tool token waste, dollar spend,
+and counterfactual savings ("setting X would have saved you $N").
+
+```
+python -m analyzer.analyze --days 30
+```
+
+Flags: `--days N` (default 30), `--project NAME`, `--root DIR`,
+`--json-out FILE` (default `~/.claude/tokenomy/insights.json`),
+`--pricing-file FILE`, `--no-report`, `-v`.
+
+Outputs a console report and a full JSON file with per-tool/per-project
+breakdowns, top-50 outliers, and recommendation list. Cache reads are excluded
+from the headline cost (Claude Code reports them cumulatively per turn, which
+double-counts when summed across sessions). Costs are estimates — see
+`console.anthropic.com` for exact billing.
+
+---
+
 ## Verifying it works
 
 After install:
