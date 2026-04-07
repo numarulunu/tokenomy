@@ -1,0 +1,17 @@
+{
+  "respectGitignore": true,
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(python:*)",
+      "Bash(pytest:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep"
+    ]
+  }
+}

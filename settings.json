@@ -1,0 +1,44 @@
+{
+  "env": {
+    "ENABLE_TOOL_SEARCH": "true",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
+    "MAX_THINKING_TOKENS": "8000",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "npx -y ccusage@latest statusline"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/read-once.sh\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/log-grep.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/cleanup.sh\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

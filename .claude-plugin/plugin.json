@@ -1,0 +1,13 @@
+{
+  "name": "firebreak",
+  "version": "0.1.0",
+  "description": "Cut Claude Code token burn 80%+ via env vars, hooks, statusline, and project templates. Includes read-once and log-grep hooks that eliminate the biggest context waste in long sessions.",
+  "author": {
+    "name": "Ionut Rosu",
+    "url": "https://github.com/numarulunu"
+  },
+  "homepage": "https://github.com/numarulunu/firebreak",
+  "repository": "https://github.com/numarulunu/firebreak",
+  "license": "MIT",
+  "keywords": ["tokens", "optimization", "hooks", "context", "efficiency"]
+}

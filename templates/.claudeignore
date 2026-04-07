@@ -1,0 +1,73 @@
+# firebreak universal .claudeignore template
+# Excludes generated files, caches, lockfiles, binaries, and databases
+# from Claude Code's context-building, cutting discovery cost 50-90%.
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+.env/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+.nuxt/
+.turbo/
+.parcel-cache/
+
+# Lockfiles (rarely useful to Claude)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+poetry.lock
+Pipfile.lock
+uv.lock
+
+# Logs (firebreak's log-grep hook will still filter if accessed)
+*.log
+logs/
+
+# Databases + blobs
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# Caches, processed outputs
+_chunks/
+_processed.json
+_embeddings_cache.json
+*.cache
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Media / binaries
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.mov
+*.webm
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.7z
