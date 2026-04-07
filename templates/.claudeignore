@@ -1,4 +1,4 @@
-# firebreak universal .claudeignore template
+# tokenomy universal .claudeignore template
 # Excludes generated files, caches, lockfiles, binaries, and databases
 # from Claude Code's context-building, cutting discovery cost 50-90%.
 
@@ -32,7 +32,7 @@ poetry.lock
 Pipfile.lock
 uv.lock
 
-# Logs (firebreak's log-grep hook will still filter if accessed)
+# Logs (tokenomy's log-grep hook will still filter if accessed)
 *.log
 logs/
 

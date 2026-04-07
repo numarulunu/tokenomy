@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# firebreak hook C — read-once
+# tokenomy hook C — read-once
 # Blocks redundant Read tool calls on unchanged files within a session.
 # Fails open on any error (never blocks a legitimate read).
 
 set -u
 
-CACHE_DIR="$HOME/.claude/firebreak"
+CACHE_DIR="$HOME/.claude/tokenomy"
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
 
 approve() { printf '{"decision":"approve"}\n'; exit 0; }
@@ -77,7 +77,7 @@ PY
 case "$RESULT" in
   BLOCK*)
     TS=$(printf '%s' "$RESULT" | awk -F'\t' '{print $2}')
-    REASON="[firebreak] You already read this file at ${TS} this session and its mtime has not changed. Use the version already in your context. If you need a fresh view, edit the file or use Bash (cat/head/tail)."
+    REASON="[tokenomy] You already read this file at ${TS} this session and its mtime has not changed. Use the version already in your context. If you need a fresh view, edit the file or use Bash (cat/head/tail)."
     printf '%s' "$REASON" | python -c 'import json,sys; print(json.dumps({"decision":"block","reason":sys.stdin.read()}))'
     exit 0
     ;;

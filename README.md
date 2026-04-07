@@ -1,14 +1,14 @@
-# firebreak
+# tokenomy
 
 **Cut Claude Code token burn by 80%+ with zero code changes.**
 
-firebreak is a Claude Code plugin that bundles ~10 token-optimization techniques into a single install: environment variables, runtime hooks that block redundant file reads and filter log files, a ccusage statusline, project templates, and a behavioral ruleset that nudges Claude toward efficient output.
+tokenomy is a Claude Code plugin that bundles ~10 token-optimization techniques into a single install: environment variables, runtime hooks that block redundant file reads and filter log files, a ccusage statusline, project templates, and a behavioral ruleset that nudges Claude toward efficient output.
 
 ---
 
 ## Bird's-eye view
 
-| Layer | Before | With firebreak |
+| Layer | Before | With tokenomy |
 |---|---|---|
 | Env vars | Default (200k ctx, verbose thinking, auto-memory, telemetry) | 70% autocompact, 8k thinking, 8k output cap, telemetry off, auto-memory off |
 | File reads | Same file re-read 5–10x per session | `read-once` hook blocks re-reads of unchanged files |
@@ -23,8 +23,8 @@ firebreak is a Claude Code plugin that bundles ~10 token-optimization techniques
 ## Install
 
 ```
-/plugin marketplace add github:numarulunu/firebreak
-/plugin install firebreak
+/plugin marketplace add github:numarulunu/tokenomy
+/plugin install tokenomy
 ```
 
 Restart Claude Code. That's it. All hooks, env vars, and the statusline wire up automatically.
@@ -32,9 +32,9 @@ Restart Claude Code. That's it. All hooks, env vars, and the statusline wire up 
 ### Dependencies (optional but recommended)
 
 - **ccusage statusline** — needs `npx` on PATH (ships with Node.js)
-- **Serena MCP** — install separately if you want LSP-powered code navigation. firebreak's CLAUDE.md tells Claude to prefer it when available.
+- **Serena MCP** — install separately if you want LSP-powered code navigation. tokenomy's CLAUDE.md tells Claude to prefer it when available.
 
-firebreak does **not** bundle Serena or ccusage. It only configures Claude Code to use them if present.
+tokenomy does **not** bundle Serena or ccusage. It only configures Claude Code to use them if present.
 
 ---
 
@@ -74,7 +74,7 @@ Use these via the `token-audit` skill (see below) or copy them manually into new
 
 ### `token-audit` skill
 
-Say "audit tokens" or "firebreak this project" and Claude will run the `token-audit` skill: check for `.claudeignore` and `.claude/settings.json` in the current project, create them from templates if missing, scan for obvious bloat (big tracked files, leaked caches), and report findings. Scope is configuration only — it never touches source code.
+Say "audit tokens" or "tokenomy this project" and Claude will run the `token-audit` skill: check for `.claudeignore` and `.claude/settings.json` in the current project, create them from templates if missing, scan for obvious bloat (big tracked files, leaked caches), and report findings. Scope is configuration only — it never touches source code.
 
 ### CLAUDE.md
 
@@ -95,16 +95,16 @@ User's own `CLAUDE.md` always takes precedence.
 
 After install:
 1. Check the statusline — should show a live token counter.
-2. Ask Claude to read the same file twice. Second read should be blocked with a `[firebreak]` message.
-3. Ask Claude to read any `.log` file >200 lines. It should see a `[firebreak] Log filtered:` header instead of the full file.
-4. Run `env | grep CLAUDE` in a Bash tool call — should show the 6 firebreak env vars.
+2. Ask Claude to read the same file twice. Second read should be blocked with a `[tokenomy]` message.
+3. Ask Claude to read any `.log` file >200 lines. It should see a `[tokenomy] Log filtered:` header instead of the full file.
+4. Run `env | grep CLAUDE` in a Bash tool call — should show the 6 tokenomy env vars.
 
 ---
 
 ## Uninstall
 
 ```
-/plugin uninstall firebreak
+/plugin uninstall tokenomy
 ```
 
 All hooks and env vars are scoped to the plugin. Uninstalling removes them cleanly. Your own `~/.claude/settings.json` is never touched.

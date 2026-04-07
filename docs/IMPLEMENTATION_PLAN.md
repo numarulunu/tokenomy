@@ -1,21 +1,21 @@
-# firebreak — Implementation Plan
+# tokenomy — Implementation Plan
 
-**Project:** firebreak — a Claude Code plugin that cuts token burn 80%+ via env vars, hooks, statusline, and project templates.
+**Project:** tokenomy — a Claude Code plugin that cuts token burn 80%+ via env vars, hooks, statusline, and project templates.
 **Owner:** Ionuț Roșu (GitHub: numarulunu)
 **License:** MIT
 **Format:** Claude Code plugin (`.claude-plugin/plugin.json`), distributed via GitHub marketplace source.
-**Repo path:** `C:\Users\Gaming PC\Desktop\Claude\firebreak\`
+**Repo path:** `C:\Users\Gaming PC\Desktop\Claude\tokenomy\`
 **Target install command for friends:**
 ```
-/plugin marketplace add github:numarulunu/firebreak
-/plugin install firebreak
+/plugin marketplace add github:numarulunu/tokenomy
+/plugin install tokenomy
 ```
 
 ---
 
 ## Context (read this first if compacted)
 
-This plan exists because the user (Ionuț, Kontext project) is consolidating ~10 token-optimization techniques into a single shareable plugin. Already-applied optimizations live in his `~/.claude/CLAUDE.md`, `~/.claude/settings.json`, and `Kontext/.claude/settings.json` — those are the *source of truth* for what firebreak should ship. The plugin is the portable version of his personal stack.
+This plan exists because the user (Ionuț, Kontext project) is consolidating ~10 token-optimization techniques into a single shareable plugin. Already-applied optimizations live in his `~/.claude/CLAUDE.md`, `~/.claude/settings.json`, and `Kontext/.claude/settings.json` — those are the *source of truth* for what tokenomy should ship. The plugin is the portable version of his personal stack.
 
 Already done in his global config (do NOT re-implement, just port into plugin):
 - 5 env vars: `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, `MAX_THINKING_TOKENS=8000`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS=8000`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `ENABLE_TOOL_SEARCH=true`
@@ -25,7 +25,7 @@ Already done in his global config (do NOT re-implement, just port into plugin):
 - Kontext `.claude/settings.json` template (respectGitignore: true + permissions)
 - CLAUDE.md additions: output discipline, model routing, subagent delegation, /rewind preference, project bootstrap rule, "Serena first for code"
 
-Hooks C and D (this plan) are the headline new feature — they're what turns firebreak from "config snippets" into a real token-saving runtime layer.
+Hooks C and D (this plan) are the headline new feature — they're what turns tokenomy from "config snippets" into a real token-saving runtime layer.
 
 ---
 
@@ -37,11 +37,11 @@ Block redundant Read tool calls. If Claude tries to read a file it has already r
 ### Mechanism
 - **Hook type:** `PreToolUse`
 - **Matcher:** `Read`
-- **Implementation:** bash script that maintains a per-session JSON cache at `~/.claude/firebreak/read-cache-${SESSION_ID}.json` mapping `{path: mtime}`.
+- **Implementation:** bash script that maintains a per-session JSON cache at `~/.claude/tokenomy/read-cache-${SESSION_ID}.json` mapping `{path: mtime}`.
 - On invocation:
   1. Parse `$ARGUMENTS` JSON to extract the file path Claude wants to read.
   2. `stat` the file to get current mtime.
-  3. Look up path in cache. If present and mtime matches → return JSON stub: `{"decision": "block", "reason": "[firebreak] You already read this file at <timestamp> and it has not changed since. Use the version already in your context. If you genuinely need a fresh view, prepend '!fresh' to your read intent."}`
+  3. Look up path in cache. If present and mtime matches → return JSON stub: `{"decision": "block", "reason": "[tokenomy] You already read this file at <timestamp> and it has not changed since. Use the version already in your context. If you genuinely need a fresh view, prepend '!fresh' to your read intent."}`
   4. Otherwise: write `{path: mtime}` to cache, return `{"decision": "approve"}`.
 - **Session isolation:** session ID comes from Claude Code's `$CLAUDE_SESSION_ID` env var (verify this exists; if not, fall back to a hash of the cwd + start time).
 - **Cache cleanup:** on SessionEnd hook, delete the per-session cache file.
@@ -86,8 +86,8 @@ Intercept Read calls targeting log files. Instead of returning the full log, ret
   3. Check user prompt for escape token `!fulllog` — if present, approve, exit.
   4. Run: `grep -nE "(ERROR|WARN|FAIL|Exception|Traceback)" "$PATH" | tail -200 > /tmp/errors`
   5. Run: `tail -50 "$PATH" > /tmp/tail`
-  6. Build a synthetic file content: header `[firebreak: log filtered. Showing matched errors + last 50 lines. Use !fulllog in your prompt to bypass.]` + errors + separator + tail.
-  7. Return `{"decision": "modify", "modified_args": {"file_path": "/tmp/firebreak-filtered.log"}}` — write the synthetic content to that path first.
+  6. Build a synthetic file content: header `[tokenomy: log filtered. Showing matched errors + last 50 lines. Use !fulllog in your prompt to bypass.]` + errors + separator + tail.
+  7. Return `{"decision": "modify", "modified_args": {"file_path": "/tmp/tokenomy-filtered.log"}}` — write the synthetic content to that path first.
 - Cleanup on SessionEnd.
 
 ### Edge cases
@@ -95,7 +95,7 @@ Intercept Read calls targeting log files. Instead of returning the full log, ret
 - Log has zero error lines — return just the tail (last 50).
 - Binary file with `.log` extension — detect via `file` command or first-byte check, pass through.
 - Path doesn't exist — pass through.
-- Hook can't write to /tmp on Windows — use `$TEMP` or `~/.claude/firebreak/tmp/`.
+- Hook can't write to /tmp on Windows — use `$TEMP` or `~/.claude/tokenomy/tmp/`.
 - Claude Code's `decision: "modify"` may not support modifying file_path directly — VERIFY this in the hook docs before relying on it. If unsupported, fallback approach: hook intercepts, runs the grep, returns the filtered content as a `decision: "block"` with a `reason` field containing the filtered text. Claude reads the reason as if it were the file content.
 
 ### Test plan
@@ -117,7 +117,7 @@ The `decision: "modify"` mechanic may not exist or may behave differently than a
 ## Plugin file layout
 
 ```
-firebreak/
+tokenomy/
 ├── .claude-plugin/
 │   └── plugin.json              # manifest: name, version, description, author
 ├── hooks/
@@ -146,21 +146,21 @@ firebreak/
 2. **Write `read-once.sh`** — implement, hook into a throwaway test repo first, run the 7-step test plan.
 3. **Write `log-grep.sh`** — try `decision: modify` first, fall back to block-with-reason if unsupported. Run the 6-step test plan.
 4. **Write `cleanup.sh`** — SessionEnd handler.
-5. **Build plugin manifest** (`.claude-plugin/plugin.json`) — Claude Code plugin schema, name=firebreak, version=0.1.0.
+5. **Build plugin manifest** (`.claude-plugin/plugin.json`) — Claude Code plugin schema, name=tokenomy, version=0.1.0.
 6. **Port settings.json** — copy env vars + statusline from `~/.claude/settings.json`, register hooks.
 7. **Copy templates** — `.claudeignore` and project settings from Kontext.
 8. **Write `token-audit` skill** — checks for `.claudeignore` + project settings in cwd, creates if missing, reports findings.
 9. **Write README** — include the bird's-eye-view table from this conversation (before / now / after C+D), install instructions, "what each piece does" section, screenshot of statusline.
 10. **Write CLAUDE.md** — behavioral rules ported from `~/.claude/CLAUDE.md` (output discipline, model routing, Serena-first, project bootstrap).
-11. **Init git, commit, create GitHub repo via `gh repo create numarulunu/firebreak --public --source=. --remote=origin --push`.**
-12. **Test install on a second machine or fresh user dir** — `/plugin marketplace add github:numarulunu/firebreak && /plugin install firebreak`. Confirm everything wires up.
+11. **Init git, commit, create GitHub repo via `gh repo create numarulunu/tokenomy --public --source=. --remote=origin --push`.**
+12. **Test install on a second machine or fresh user dir** — `/plugin marketplace add github:numarulunu/tokenomy && /plugin install tokenomy`. Confirm everything wires up.
 13. **Tag v0.1.0**, write release notes.
 
 ---
 
 ## What to tell Claude when starting the clean session
 
-> Read `C:\Users\Gaming PC\Desktop\Claude\firebreak\docs\IMPLEMENTATION_PLAN.md` and execute it from step 1. Stop after step 4 (hooks built and tested) for review before proceeding to packaging.
+> Read `C:\Users\Gaming PC\Desktop\Claude\tokenomy\docs\IMPLEMENTATION_PLAN.md` and execute it from step 1. Stop after step 4 (hooks built and tested) for review before proceeding to packaging.
 
 That's it. The plan is self-contained.
 
@@ -168,9 +168,9 @@ That's it. The plan is self-contained.
 
 ## Risks and explicit non-goals
 
-- **Risk:** hooks that block tool calls can hard-break a session if buggy. Mitigation: every hook fails open (on error → approve). Test on throwaway repos before merging into firebreak.
+- **Risk:** hooks that block tool calls can hard-break a session if buggy. Mitigation: every hook fails open (on error → approve). Test on throwaway repos before merging into tokenomy.
 - **Risk:** ccusage dependency means npm/npx must be on user's PATH. Document in INSTALL.md.
 - **Risk:** Serena dependency means uv must be installed. Document, but don't bundle (too heavy).
-- **Non-goal:** firebreak does NOT ship Serena, ccusage, or any third-party tool. It only configures Claude Code to use them if present.
-- **Non-goal:** firebreak does NOT touch the user's existing CLAUDE.md or settings.json. The plugin loads its config alongside, doesn't overwrite. (Plugin scope handles this automatically.)
+- **Non-goal:** tokenomy does NOT ship Serena, ccusage, or any third-party tool. It only configures Claude Code to use them if present.
+- **Non-goal:** tokenomy does NOT touch the user's existing CLAUDE.md or settings.json. The plugin loads its config alongside, doesn't overwrite. (Plugin scope handles this automatically.)
 - **Non-goal:** no Windows-specific or Linux-specific code paths if avoidable. Bash hooks must work on git-bash (Windows) and standard bash (Linux/macOS).

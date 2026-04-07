@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# firebreak hook D — log-grep preprocessor
+# tokenomy hook D — log-grep preprocessor
 # When Read targets a log file, replace content with: error/warn lines + last 50.
 # Fails open on any error.
 
 set -u
 
-CACHE_DIR="$HOME/.claude/firebreak"
+CACHE_DIR="$HOME/.claude/tokenomy"
 TMP_DIR="$CACHE_DIR/tmp"
 mkdir -p "$TMP_DIR" 2>/dev/null || true
 
@@ -92,9 +92,9 @@ if len(matches) > 200:
 tail = lines[-50:]
 
 out = []
-out.append(f"[firebreak] Log filtered: {total} total lines. Showing {len(matches)} matched (ERROR/WARN/FAIL/Exception/Traceback/CRITICAL/FATAL) + last 50 lines.")
-out.append(f"[firebreak] Source: {path}")
-out.append(f"[firebreak] To bypass and read the full log, include the token !fulllog in your next user prompt, or use Bash: cat \"{path}\".")
+out.append(f"[tokenomy] Log filtered: {total} total lines. Showing {len(matches)} matched (ERROR/WARN/FAIL/Exception/Traceback/CRITICAL/FATAL) + last 50 lines.")
+out.append(f"[tokenomy] Source: {path}")
+out.append(f"[tokenomy] To bypass and read the full log, include the token !fulllog in your next user prompt, or use Bash: cat \"{path}\".")
 out.append("")
 out.append("=== MATCHED LINES ===")
 if matches:

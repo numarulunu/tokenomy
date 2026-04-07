@@ -1,11 +1,11 @@
 ---
 name: token-audit
-description: Use when the user asks to audit token usage in a project, set up firebreak in a new repo, or says "firebreak this project" / "token audit". Checks for .claudeignore and .claude/settings.json, creates them from firebreak templates if missing, and reports the findings.
+description: Use when the user asks to audit token usage in a project, set up tokenomy in a new repo, or says "tokenomy this project" / "token audit". Checks for .claudeignore and .claude/settings.json, creates them from tokenomy templates if missing, and reports the findings.
 ---
 
 # token-audit
 
-Audit the current project for token-efficiency setup. Create missing config files from firebreak's templates. Report what changed.
+Audit the current project for token-efficiency setup. Create missing config files from tokenomy's templates. Report what changed.
 
 ## Steps
 
@@ -13,7 +13,7 @@ Audit the current project for token-efficiency setup. Create missing config file
 
 2. **Check for `.claudeignore`.**
    - If missing: copy `${CLAUDE_PLUGIN_ROOT}/templates/.claudeignore` into the project root.
-   - If present: read it, compare against the firebreak template, and list any missing standard exclude patterns. Offer to merge (do not overwrite without asking).
+   - If present: read it, compare against the tokenomy template, and list any missing standard exclude patterns. Offer to merge (do not overwrite without asking).
 
 3. **Check for `.claude/settings.json`.**
    - If missing: create `.claude/` and copy `${CLAUDE_PLUGIN_ROOT}/templates/project-settings.json` into `.claude/settings.json`.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# firebreak SessionEnd cleanup — remove per-session caches and tmp files.
+# tokenomy SessionEnd cleanup — remove per-session caches and tmp files.
 # Fails silent; never errors the session end.
 
 set -u
-CACHE_DIR="$HOME/.claude/firebreak"
+CACHE_DIR="$HOME/.claude/tokenomy"
 [ -d "$CACHE_DIR" ] || { printf '{}\n'; exit 0; }
 
 INPUT=$(cat 2>/dev/null || true)
