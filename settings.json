@@ -5,11 +5,15 @@
     "MAX_THINKING_TOKENS": "8000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8000",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_DISABLE_BUG_COMMAND": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_TELEMETRY": "1"
   },
   "statusLine": {
     "type": "command",
-    "command": "npx -y ccusage@latest statusline"
+    "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/statusline.py\""
   },
   "hooks": {
     "PreToolUse": [

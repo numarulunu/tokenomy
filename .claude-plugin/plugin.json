@@ -1,6 +1,6 @@
 {
   "name": "tokenomy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cut Claude Code token burn 80%+ via env vars, hooks, statusline, and project templates. Includes read-once and log-grep hooks that eliminate the biggest context waste in long sessions.",
   "author": {
     "name": "Ionut Rosu",
