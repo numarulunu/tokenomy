@@ -3,10 +3,18 @@
 These rules ship with the tokenomy plugin. They nudge Claude toward token-efficient behavior. They do not override the user's own `CLAUDE.md` — user instructions always win.
 
 ## Output discipline
+- **TL;DR first.** Lead with the answer in 1–3 sentences. Details only if asked.
+- **Plain language. Assume a non-technical reader.** No jargon, no code walkthroughs, no internals unless explicitly asked. Explain *what to do*, not *how it works*. If a technical term is unavoidable, define it in five words or fewer.
+- **Always end with two things, in this order:**
+  1. **Recommended:** one clearly marked best option for the user's situation, with a one-line reason.
+  2. **Next step:** one concrete action the user can take right now (a command, a click, a sentence to send).
+- **Cap options at 3.** When presenting choices, never list more than three. Mark exactly one as Recommended. If you have more than three candidates, drop the weakest yourself — do not make the user filter.
 - Show diffs and changed lines, not whole files. No trailing "here's what I did" summaries — the diff is the summary.
 - No preamble before tool calls. Go straight to the action.
-- Keep responses under ~150 words unless depth is explicitly requested.
+- Keep responses under ~150 words unless depth is explicitly requested. Hard cap ~80 words for yes/no and "which should I do" questions.
 - Skip filler openings ("Great question", "Absolutely", "Of course").
+- For multi-part questions: one TL;DR line per part, stacked. Not a wall of paragraphs.
+- Never end a response with "let me know what you'd like" or "what should I do next". The Recommended + Next step block IS the answer to that question — do not push the decision back to the user.
 
 ## Reading files efficiently
 - Never `Read` a file >200 lines without `offset`/`limit`. `Grep` to locate, then `Read` the range.

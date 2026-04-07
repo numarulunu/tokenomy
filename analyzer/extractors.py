@@ -39,7 +39,8 @@ class Event:
     input_summary: dict = field(default_factory=dict)
     # tool_result
     response_size_bytes: int = 0
-    truncated: bool = False
+    truncated: bool = False   # real mid-response truncation (marker matched)
+    is_error: bool = False    # tool_result.is_error — benign 99.5% of the time
     # unended assistant text (used for counterfactual loss heuristic)
     text_tail: Optional[str] = None
 
@@ -158,7 +159,8 @@ def iter_session_file(path: str) -> Iterator[Event]:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         flat = _flatten_content(block.get("content"))
                         size = len(flat)
-                        trunc = any(m in flat for m in _TRUNCATION_MARKERS) or bool(block.get("is_error"))
+                        trunc = any(m in flat for m in _TRUNCATION_MARKERS)
+                        is_err = bool(block.get("is_error"))
                         yield Event(
                             kind="tool_result",
                             ts=ts,
@@ -167,6 +169,7 @@ def iter_session_file(path: str) -> Iterator[Event]:
                             tool_use_id=block.get("tool_use_id"),
                             response_size_bytes=size,
                             truncated=trunc,
+                            is_error=is_err,
                         )
 
             elif rtype == "system":

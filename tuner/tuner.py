@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Tuple
 
 from analyzer.extractors import Event, iter_corpus
 from tuner.losses import detect_all, detect_user_pinned
-from tuner.settings_writer import FLOORS, write_settings
+from tuner.settings_writer import FLOORS, merge_into_user_settings
 from tuner.state import empty_state, load_state, save_state
 from tuner.weighting import age_days, compute_cap, confidence, session_weight
 
@@ -31,6 +31,7 @@ LOSS_FREEZE_DAYS = 14
 
 DEFAULT_HOME = os.path.expanduser("~/.claude/tokenomy")
 DEFAULT_CORPUS_ROOT = os.path.expanduser("~/.claude/projects")
+DEFAULT_USER_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
 
 # ─────────────────── corpus → samples ───────────────────
@@ -294,6 +295,11 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--corpus-root", default=DEFAULT_CORPUS_ROOT)
     ap.add_argument("--home", default=DEFAULT_HOME)
+    ap.add_argument(
+        "--user-settings",
+        default=DEFAULT_USER_SETTINGS,
+        help="Path to ~/.claude/settings.json to merge tokenomy env caps into.",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -305,10 +311,16 @@ def main(argv: List[str] | None = None) -> int:
     home = args.home
     os.makedirs(home, exist_ok=True)
     applied_path = os.path.join(home, "applied.json")
-    settings_path = os.path.join(home, "auto-settings.json")
+    lock_dir = os.path.join(home, "tuner.lock.d")
 
     if args.reset:
-        for fn in ("applied.json", "auto-settings.json", "sessions.jsonl", "losses.jsonl"):
+        # Also strip tokenomy's managed env keys from the user's settings.json
+        # so reset actually returns the user to a pre-tuner state.
+        try:
+            _strip_managed_env(args.user_settings)
+        except Exception as e:  # fail-open: reset must always succeed
+            log.warning("could not strip managed env from %s: %s", args.user_settings, e)
+        for fn in ("applied.json", "losses.jsonl"):
             p = os.path.join(home, fn)
             if os.path.exists(p):
                 os.unlink(p)
@@ -327,32 +339,73 @@ def main(argv: List[str] | None = None) -> int:
         print(f"user_pinned: {state.get('user_pinned')}")
         return 0
 
-    log.info("scanning corpus at %s", args.corpus_root)
-    if not os.path.exists(args.corpus_root):
-        log.warning("corpus root missing — writing baseline-only settings")
-        stats = {"out_tokens": [], "mcp_sizes": {}, "ctx_pcts": [], "events": [], "effective_n": 0.0}
-    else:
-        stats = collect_samples(args.corpus_root, mcp_allow=DEFAULT_MCP_ALLOW)
+    try:
+        log.info("scanning corpus at %s", args.corpus_root)
+        if not os.path.exists(args.corpus_root):
+            log.warning("corpus root missing — writing baseline-only settings")
+            stats = {"out_tokens": [], "mcp_sizes": {}, "ctx_pcts": [], "events": [], "effective_n": 0.0}
+        else:
+            stats = collect_samples(args.corpus_root, mcp_allow=DEFAULT_MCP_ALLOW)
 
-    proposed = compute_caps_per_setting(stats)
-    losses = detect_all(stats["events"], capped_tools=())
-    state = apply_loss_freezes(state, losses)
+        proposed = compute_caps_per_setting(stats)
+        losses = detect_all(stats["events"], capped_tools=())
+        state = apply_loss_freezes(state, losses)
 
-    final, state = apply_hysteresis_cooldown_freeze(state, proposed)
-    state["effective_n"] = stats["effective_n"]
-    state["confidence"] = confidence(stats["effective_n"])
-    state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
+        final, state = apply_hysteresis_cooldown_freeze(state, proposed)
+        state["effective_n"] = stats["effective_n"]
+        state["confidence"] = confidence(stats["effective_n"])
+        state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
 
-    if args.dry_run:
-        _print_diff(load_state(applied_path).get("caps", {}), final)
-        print(f"effective_n: {stats['effective_n']:.1f}  confidence: {state['confidence']:.2f}")
-        print(f"losses detected: {len(losses)}")
+        if args.dry_run:
+            _print_diff(load_state(applied_path).get("caps", {}), final)
+            print(f"effective_n: {stats['effective_n']:.1f}  confidence: {state['confidence']:.2f}")
+            print(f"losses detected: {len(losses)}")
+            return 0
+
+        user_pinned = state.get("user_pinned") or []
+        merged = merge_into_user_settings(
+            args.user_settings,
+            final,
+            user_pinned=user_pinned,
+        )
+        save_state(applied_path, state)
+        log.info("merged %d env keys into %s; wrote %s", len(merged), args.user_settings, applied_path)
         return 0
+    finally:
+        # Always release the SessionStart hook's lock dir, even on crash. The
+        # hook's bash trap only fires while the hook shell is alive — it does
+        # NOT cover the backgrounded tuner. This is the real lock release.
+        try:
+            if os.path.isdir(lock_dir):
+                os.rmdir(lock_dir)
+        except OSError:
+            pass
 
-    write_settings(settings_path, final)
-    save_state(applied_path, state)
-    log.info("wrote %s and %s", settings_path, applied_path)
-    return 0
+
+def _strip_managed_env(user_settings_path: str) -> None:
+    """Remove tokenomy-managed env keys from the user's settings.json.
+
+    Reads the `__tokenomy__.managed_env_keys` sentinel and deletes each listed
+    key from the `env` block (unless it's been user-pinned externally — we
+    can't know that here, so we prune everything we claimed). Also removes the
+    sentinel itself. Leaves a `.tokenomy.bak` file untouched for manual restore.
+    """
+    import json as _json
+    if not os.path.exists(user_settings_path):
+        return
+    with open(user_settings_path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    if not isinstance(data, dict):
+        return
+    meta = data.get("__tokenomy__") or {}
+    managed = meta.get("managed_env_keys") or []
+    env_block = data.get("env") if isinstance(data.get("env"), dict) else {}
+    for k in managed:
+        env_block.pop(k, None)
+    data["env"] = env_block
+    data.pop("__tokenomy__", None)
+    from tuner.settings_writer import _atomic_write_json
+    _atomic_write_json(user_settings_path, data)
 
 
 if __name__ == "__main__":

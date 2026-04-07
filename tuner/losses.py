@@ -22,7 +22,12 @@ def _server_of(tool_name: str | None) -> str | None:
 
 
 def detect_truncation_requery(events: List[Event]) -> List[Dict[str, Any]]:
-    """A truncated/error tool_result followed within 2 turns by another call to the same tool."""
+    """A truly-truncated tool_result (marker match) followed within 2 turns by another call to the same tool.
+
+    `is_error` is deliberately NOT treated as truncation — ~99.5% of is_error
+    results in real corpora are benign (ENOENT, schema errors, cancelled calls)
+    and would flood the loss log with false positives.
+    """
     out: List[Dict[str, Any]] = []
     # Build a tool_use_id → tool_name map
     name_by_id: Dict[str, str] = {}
@@ -103,7 +108,12 @@ def detect_compact_after_big_result(events: List[Event], big_threshold: int = 30
 
 
 def detect_error_after_cap(events: List[Event], capped_tools: Iterable[str] = ()) -> List[Dict[str, Any]]:
-    """Error tool_result for any currently-capped tool."""
+    """Error tool_result for any currently-capped tool.
+
+    Gated on `is_error` (the raw tool_result flag), not `truncated` — the
+    signal we want here is "our cap broke this tool", and tools report that
+    via is_error, not via a truncation marker.
+    """
     capped = set(capped_tools)
     if not capped:
         return []
@@ -113,7 +123,7 @@ def detect_error_after_cap(events: List[Event], capped_tools: Iterable[str] = ()
         if e.kind == "tool_use" and e.tool_use_id:
             name_by_id[e.tool_use_id] = e.tool_name or ""
     for e in events:
-        if e.kind != "tool_result" or not e.truncated:
+        if e.kind != "tool_result" or not e.is_error:
             continue
         tname = name_by_id.get(e.tool_use_id or "", "")
         if tname in capped:

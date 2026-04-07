@@ -11,7 +11,7 @@
 
 - v0.1.1 shipped: 4 DISABLE flags + custom statusline.
 - v0.2.0 shipped: read-only retrospective analyzer (`analyzer/`). 13 tests passing. Verified on 2,217 real session files. Headline cost calc excludes cache_read tokens (cumulative double-count).
-- v0.3.0 = the auto-tuner. Reads the analyzer's outputs + a rolling per-session log, picks optimal caps with **recency-weighted percentiles over the full corpus**, writes `auto-settings.json` that Claude Code loads automatically. Async background, fail-open, self-correcting.
+- v0.3.0 = the auto-tuner. Reads the analyzer's outputs + a rolling per-session log, picks optimal caps with **recency-weighted percentiles over the full corpus**, and **merges its env caps directly into `~/.claude/settings.json`** (fenced by a `__tokenomy__` sentinel block, backed up once to `settings.json.tokenomy.bak`). Claude Code does NOT auto-load files under `~/.claude/<subdir>/`, and plugin `settings.json` only honors the `agent` key per the plugins doc — so a sidecar `auto-settings.json` would be inert. Async background, fail-open, self-correcting.
 
 The user is a heavy Claude Code user with 647 sessions / 30 days. The plugin must work for him on day-one of v0.3.0 install (apply aggressive caps immediately) AND for a brand-new user with 5 sessions (apply only safe defaults until data accumulates).
 
@@ -147,10 +147,10 @@ tokenomy/
 │   ├── tuner.py                # compute_caps + apply logic + main entrypoint
 │   ├── losses.py               # 5 loss detectors + paired fixtures wiring
 │   ├── state.py                # applied.json read/write, atomic
-│   └── settings_writer.py      # writes auto-settings.json
+│   └── settings_writer.py      # merges env caps into ~/.claude/settings.json
 ├── hooks/
-│   ├── session-end.sh          # NEW: appends sessions.jsonl line
-│   └── session-start.sh        # NEW: spawns tuner if stale
+│   ├── hooks.json              # plugin hook registrations (SessionStart, etc.)
+│   └── session-start.sh        # spawns tuner if stale
 ├── tests/
 │   ├── test_analyzer.py        # existing
 │   ├── test_weighting.py       # new
@@ -164,13 +164,6 @@ tokenomy/
 ---
 
 ## State files (in `~/.claude/tokenomy/`)
-
-### `sessions.jsonl` (append-only, written by SessionEnd hook)
-
-One line per session:
-```json
-{"ts":"2026-04-08T14:32:00Z","sid":"abc-123","project":"Kontext","tools":142,"compacts":1,"max_ctx":18234,"out_tokens_max":3450,"losses":0,"cost":0.84}
-```
 
 ### `applied.json` (atomic, written by tuner)
 
@@ -201,9 +194,14 @@ One line per session:
 }
 ```
 
-### `auto-settings.json` (written by tuner, loaded by Claude Code)
+### `~/.claude/settings.json` (merged in-place by tuner)
 
-Plain Claude Code settings format. Contains only the env block tuner manages.
+Tokenomy edits the user's real settings file atomically:
+
+- One-time backup to `~/.claude/settings.json.tokenomy.bak` before the first mutation.
+- Tuned caps + static baselines are written into the `env` block.
+- A `__tokenomy__` sentinel records `managed_env_keys` so subsequent runs (and `--reset`) can prune exactly the keys tokenomy claimed without touching user-authored keys.
+- Anything listed in `state.user_pinned` is never written, even if the tuner computed a value for it.
 
 ### `losses.jsonl` (append-only, written by tuner)
 
@@ -217,18 +215,16 @@ Background tuner output. Errors land here, never on stderr.
 
 ## Hook specifications
 
-### SessionEnd hook (`hooks/session-end.sh`)
-
-10 lines of bash. Reads the session JSONL via the analyzer's extractor in a 1-shot subprocess (or computes inline from `$CLAUDE_SESSION_FILE` if exposed). Appends one line to `sessions.jsonl`. Fail-open: any error → exit 0.
-
 ### SessionStart hook (`hooks/session-start.sh`)
 
 Logic:
 1. If `~/.claude/tokenomy/applied.json` missing → spawn `python -m tuner.tuner --first-run` in background, exit 0.
-2. Else read `last_tune_at`. If >3 days ago OR `sessions.jsonl` has ≥5 new lines since last tune → spawn `python -m tuner.tuner` in background, exit 0.
+2. Else if `applied.json` mtime is >3 days old → spawn `python -m tuner.tuner` in background, exit 0.
 3. Else exit 0.
 
-Spawn mechanism: Windows `start /b`, Unix `nohup ... &`. Output redirected to `tuner.log`. Hook returns in <50ms always.
+Spawn mechanism: unconditional `nohup python -m tuner.tuner ... </dev/null >> tuner.log 2>&1 &` inside an outer subshell, with `disown` where available. No `start /b` branching. Hook returns in <50ms always. Concurrency is gated by an atomic `mkdir tuner.lock.d`; the tuner clears its own lock dir in a `finally` block.
+
+A previous design also tracked sessions via a `sessions.jsonl` log written by a `SessionEnd` hook. That pipeline was triple-broken (orphan hook, wrong input channel, no reader) and is removed: incremental retune is now driven solely by `applied.json` mtime, since the analyzer already walks `~/.claude/projects/**/*.jsonl` directly when it runs.
 
 ---
 
@@ -264,7 +260,7 @@ Pure functions for `compute_caps_per_setting` and `apply_hysteresis_cooldown_fre
 python -m tuner.tuner               # background-safe retune
 python -m tuner.tuner --first-run   # full corpus scan (slower)
 python -m tuner.tuner --dry-run     # compute, print diff vs current, do not write
-python -m tuner.tuner --reset       # restore settings.json.bak, delete applied.json, sessions.jsonl, losses.jsonl
+python -m tuner.tuner --reset       # strip tokenomy-managed env keys from ~/.claude/settings.json, delete applied.json + losses.jsonl
 python -m tuner.tuner --status      # human-readable current state, last 5 changes, frozen settings, savings est
 ```
 
@@ -283,7 +279,6 @@ python -m tuner.tuner --status      # human-readable current state, last 5 chang
 7. **`tuner.py` `compute_caps_per_setting` + tests.** Pure function. Input: corpus stats (already weighted) + applied state. Output: proposed caps dict. Test against synthetic distributions where the right answer is hand-computable.
 8. **`tuner.py` `apply_hysteresis_cooldown_freeze` + tests.** Pure function. Input: proposed + applied state. Output: final caps + new state. Test all branches: tighten allowed, tighten blocked by hysteresis, tighten blocked by cooldown, tighten blocked by freeze, loosen allowed, loosen blocked by hysteresis.
 9. **`tuner.py` `main()` end-to-end** wired together. Integration test: run on synthetic corpus, verify produced `auto-settings.json` is reasonable.
-10. **SessionEnd hook** (`hooks/session-end.sh`). Test by running it manually with a fixture session file path. Confirm `sessions.jsonl` line appears.
 11. **SessionStart hook** (`hooks/session-start.sh`). Test the spawn-and-detach logic on Windows + WSL/Linux. Confirm hook returns in <50ms even on cold start.
 12. **First-run path.** Delete all state files. Trigger a SessionStart. Confirm tuner runs in background, writes state, and second SessionStart picks up the new caps.
 13. **Real-data dry run.** `python -m tuner.tuner --dry-run` against Ionuț's 647 sessions. Verify proposed caps look sane: `MAX_MCP_OUTPUT_TOKENS.playwright` should be very high (~200k), `serena` should be ~6-8k, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` should reflect his recent compact-early behavior (likely 25-40, not 85).
@@ -327,8 +322,7 @@ python -m tuner.tuner --status      # human-readable current state, last 5 chang
 8. **`MAX_MCP_OUTPUT_TOKENS` per-server format unsupported.** If Claude Code only accepts a global value, tuner uses `max()` of per-server caps. Detect via probe at install time, store decision in `applied.json.format_version`.
 9. **Half-life inappropriate for batch users.** A user who runs Claude Code in 1-week bursts every 2 months will have all sessions decay before next burst. Mitigation: clamp minimum weight to 0.01 so old data still has nonzero influence. Floors prevent disasters anyway.
 10. **Sessions in future timestamps.** Skip with warning. Don't crash.
-11. **`sessions.jsonl` grows unbounded.** Rotate when >10MB: keep most recent half, archive rest to `sessions.jsonl.1`.
-12. **Hook script not executable on Unix.** README install instructions mention `chmod +x hooks/*.sh`. Hook itself is bash, not sh, for arrays.
+11. **Hook script not executable on Unix.** README install instructions mention `chmod +x hooks/*.sh`. Hook itself is bash, not sh, for arrays.
 
 ---
 

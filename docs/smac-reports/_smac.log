@@ -1,0 +1,2 @@
+[2026-04-08T02:07:36+03:00] START question="tokenomy v0.3.0 runtime correctness 7-item audit"
+[2026-04-08T02:14:58+03:00] END report=docs/smac-reports/2026-04-08-tokenomy-v030-runtime-correctness.md findings=7 confirmed=6 partial=1 disputed=0

@@ -99,10 +99,14 @@ SessionStart hook, fail-open, self-correcting.
 
 ```
 python -m tuner.tuner --dry-run     # preview proposed caps vs current state
-python -m tuner.tuner                # apply (writes auto-settings.json)
+python -m tuner.tuner                # apply (merges env caps into ~/.claude/settings.json)
 python -m tuner.tuner --status       # current caps, freezes, pinned settings
-python -m tuner.tuner --reset        # wipe tuner state, restore defaults
+python -m tuner.tuner --reset        # strip tokenomy's managed env keys, wipe state
 ```
+
+Tokenomy edits `~/.claude/settings.json` atomically, fenced by a `__tokenomy__`
+sentinel block, and keeps a one-time backup at `~/.claude/settings.json.tokenomy.bak`.
+Keys listed in `state.user_pinned` are never touched.
 
 Highlights:
 - **Recency weighting** (half-life 14d; 7d for context-compact behavior) —
@@ -119,8 +123,10 @@ Highlights:
 - **User pinning** — anything you set in your personal `~/.claude/settings.json`
   is detected and never touched.
 
-State lives in `~/.claude/tokenomy/`: `applied.json`, `auto-settings.json`,
-`sessions.jsonl`, `losses.jsonl`, `tuner.log`.
+State lives in `~/.claude/tokenomy/`: `applied.json`, `losses.jsonl`,
+`tuner.log`. Env caps themselves are merged into
+`~/.claude/settings.json` (the only file Claude Code actually auto-loads at
+user scope).
 
 ## Analyzer (v0.2.0)
 

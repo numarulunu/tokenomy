@@ -15,8 +15,14 @@ def _tool_use(name, tid="t1"):
     return Event(kind="tool_use", tool_name=name, tool_use_id=tid)
 
 
-def _tool_result(size=100, truncated=False, tid="t1"):
-    return Event(kind="tool_result", response_size_bytes=size, truncated=truncated, tool_use_id=tid)
+def _tool_result(size=100, truncated=False, is_error=False, tid="t1"):
+    return Event(
+        kind="tool_result",
+        response_size_bytes=size,
+        truncated=truncated,
+        is_error=is_error,
+        tool_use_id=tid,
+    )
 
 
 def _assistant(tail=""):
@@ -79,7 +85,7 @@ def test_compact_after_small_result_silent():
 def test_error_after_cap_fires():
     evs = [
         _tool_use("mcp__serena__find_symbol", "t1"),
-        _tool_result(size=100, truncated=True, tid="t1"),
+        _tool_result(size=100, is_error=True, tid="t1"),
     ]
     out = detect_error_after_cap(evs, capped_tools={"mcp__serena__find_symbol"})
     assert len(out) == 1
@@ -89,9 +95,28 @@ def test_error_after_cap_fires():
 def test_error_after_cap_silent_when_not_capped():
     evs = [
         _tool_use("mcp__serena__find_symbol", "t1"),
-        _tool_result(size=100, truncated=True, tid="t1"),
+        _tool_result(size=100, is_error=True, tid="t1"),
     ]
     assert detect_error_after_cap(evs, capped_tools=set()) == []
+
+
+def test_error_after_cap_ignores_pure_truncation_without_error():
+    # truncation marker matched but is_error=False → not an "error after cap" signal
+    evs = [
+        _tool_use("mcp__serena__find_symbol", "t1"),
+        _tool_result(size=100, truncated=True, is_error=False, tid="t1"),
+    ]
+    assert detect_error_after_cap(evs, capped_tools={"mcp__serena__find_symbol"}) == []
+
+
+# Regression: is_error alone must NOT be treated as truncation
+def test_truncation_requery_ignores_benign_is_error():
+    evs = [
+        _tool_use("Read", "t1"),
+        _tool_result(size=100, truncated=False, is_error=True, tid="t1"),
+        _tool_use("Read", "t2"),
+    ]
+    assert detect_truncation_requery(evs) == []
 
 
 # 5. user_pinned
