@@ -1,0 +1,359 @@
+"""tokenomy v0.3.0 auto-tuner main entrypoint.
+
+Pure functions:
+- compute_caps_per_setting(corpus_stats) -> proposed caps
+- apply_hysteresis_cooldown_freeze(state, proposed) -> final caps + new state
+
+I/O wrappers:
+- main(): orchestrates load → compute → apply → write
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Tuple
+
+from analyzer.extractors import Event, iter_corpus
+from tuner.losses import detect_all, detect_user_pinned
+from tuner.settings_writer import FLOORS, write_settings
+from tuner.state import empty_state, load_state, save_state
+from tuner.weighting import age_days, compute_cap, confidence, session_weight
+
+log = logging.getLogger("tuner")
+
+TIGHTEN_THRESHOLD = 0.10
+LOOSEN_THRESHOLD = 0.05
+COOLDOWN_SESSIONS = 5
+LOSS_FREEZE_DAYS = 14
+
+DEFAULT_HOME = os.path.expanduser("~/.claude/tokenomy")
+DEFAULT_CORPUS_ROOT = os.path.expanduser("~/.claude/projects")
+
+
+# ─────────────────── corpus → samples ───────────────────
+
+
+DEFAULT_MCP_ALLOW = {"context7", "kontext", "sequential-thinking", "serena", "plugin_context7_context7"}
+
+
+def _server_matches(server: str, allow: set[str]) -> bool:
+    if not allow:
+        return True
+    if server in allow:
+        return True
+    # fuzzy: "plugin_context7_context7" counts as "context7"
+    low = server.lower()
+    return any(a in low for a in allow)
+
+
+def collect_samples(
+    corpus_root: str,
+    now: datetime | None = None,
+    mcp_allow: set[str] | None = None,
+) -> Dict[str, Any]:
+    """Walk corpus, return weighted samples per setting + per-MCP-server."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    out_tokens: List[Tuple[float, float]] = []
+    mcp_sizes: Dict[str, List[Tuple[float, float]]] = {}
+    ctx_pcts: List[Tuple[float, float]] = []
+    all_events_for_losses: List[Event] = []
+
+    name_by_id: Dict[str, str] = {}
+    session_max_ctx: Dict[str, int] = {}
+
+    for path, events in iter_corpus(corpus_root):
+        try:
+            ev_list = list(events)
+        except Exception as e:
+            log.debug("skipping %s: %s", path, e)
+            continue
+        if not ev_list:
+            continue
+        # weight from most recent ts in this session
+        last_ts = next((e.ts for e in reversed(ev_list) if e.ts), None)
+        w = session_weight(age_days(last_ts, now)) if last_ts else 1.0
+
+        local_name_by_id: Dict[str, str] = {}
+        max_ctx = 0
+        for e in ev_list:
+            if e.kind == "tool_use" and e.tool_use_id:
+                local_name_by_id[e.tool_use_id] = e.tool_name or ""
+            elif e.kind == "assistant_usage":
+                if e.output_tokens > 0:
+                    out_tokens.append((float(e.output_tokens), w))
+                ctx = e.input_tokens + e.cache_creation_tokens + e.cache_read_tokens
+                if ctx > max_ctx:
+                    max_ctx = ctx
+            elif e.kind == "tool_result":
+                tname = local_name_by_id.get(e.tool_use_id or "", "")
+                if tname.startswith("mcp__"):
+                    parts = tname.split("__")
+                    server = parts[1] if len(parts) >= 3 else "unknown"
+                    if mcp_allow is None or _server_matches(server, mcp_allow):
+                        mcp_sizes.setdefault(server, []).append((float(e.response_size_bytes), w))
+        if max_ctx > 0:
+            # treat as % of 200k baseline; use a shorter half-life (7d) for
+            # context habits since the user is actively changing compact behavior
+            from tuner.weighting import session_weight as _sw
+            age_d = age_days(last_ts, now) if last_ts else 0.0
+            ctx_w = 0.5 ** (age_d / 7.0) if age_d > 0 else 1.0
+            ctx_w = max(ctx_w, 0.01)
+            pct = min(100.0, (max_ctx / 200_000.0) * 100.0)
+            ctx_pcts.append((pct, ctx_w))
+        # keep events for loss detection (memory bounded — only first ~1000 sessions)
+        if len(all_events_for_losses) < 200_000:
+            all_events_for_losses.extend(ev_list)
+
+    eff_n = sum(w for _, w in out_tokens) if out_tokens else 0.0
+    return {
+        "out_tokens": out_tokens,
+        "mcp_sizes": mcp_sizes,
+        "ctx_pcts": ctx_pcts,
+        "events": all_events_for_losses,
+        "effective_n": eff_n,
+    }
+
+
+# ─────────────────── pure: compute caps ───────────────────
+
+
+def compute_caps_per_setting(stats: Dict[str, Any]) -> Dict[str, Any]:
+    caps: Dict[str, Any] = {}
+
+    # CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    if stats["out_tokens"]:
+        caps["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = compute_cap(
+            stats["out_tokens"], floor=FLOORS["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+        )
+    else:
+        caps["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = FLOORS["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+
+    # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE — p75 captures *typical* compact point,
+    # not worst-case. Plus 10% headroom. Context samples use a shorter half-life
+    # (7d) via pre-reweighting upstream; here we just take p75.
+    if stats["ctx_pcts"]:
+        from tuner.weighting import weighted_percentile
+        p = weighted_percentile(stats["ctx_pcts"], 0.75)
+        caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = max(int(p + 10), FLOORS["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
+    else:
+        caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = 70
+
+    # MAX_MCP_OUTPUT_TOKENS per server
+    per_server: Dict[str, int] = {}
+    for server, samples in stats["mcp_sizes"].items():
+        per_server[server] = compute_cap(samples, floor=FLOORS["MAX_MCP_OUTPUT_TOKENS"])
+    if per_server:
+        caps["MAX_MCP_OUTPUT_TOKENS"] = per_server
+
+    return caps
+
+
+# ─────────────────── pure: hysteresis ───────────────────
+
+
+def _delta(old: int, new: int) -> float:
+    if old == 0:
+        return 1.0
+    return (old - new) / old  # positive = tightening
+
+
+def _apply_one(
+    name: str,
+    old: int,
+    new: int,
+    cooldowns: Dict[str, Any],
+    freezes: Dict[str, Any],
+    now: datetime,
+) -> Tuple[int, str]:
+    """Return (chosen, reason)."""
+    # No prior value -> always initialize (freezes/cooldowns can't preserve nothing)
+    if old == 0:
+        return new, "init"
+    # freeze check
+    fr = freezes.get(name)
+    if fr:
+        until = fr.get("until")
+        try:
+            until_dt = datetime.fromisoformat(until.replace("Z", "+00:00")) if until else None
+        except (AttributeError, ValueError):
+            until_dt = None
+        if until_dt and until_dt > now:
+            return old, "frozen"
+    # cooldown check
+    cd = cooldowns.get(name)
+    if cd and cd.get("sessions_remaining", 0) > 0:
+        return old, "cooldown"
+    d = _delta(old, new)
+    if d >= TIGHTEN_THRESHOLD:
+        return new, "tighten"
+    if d <= -LOOSEN_THRESHOLD:
+        return new, "loosen"
+    return old, "hysteresis"
+
+
+def apply_hysteresis_cooldown_freeze(
+    state: Dict[str, Any],
+    proposed: Dict[str, Any],
+    now: datetime | None = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    old_caps = state.get("caps", {}) or {}
+    cooldowns = dict(state.get("cooldowns", {}) or {})
+    freezes = state.get("freezes", {}) or {}
+    user_pinned = set(state.get("user_pinned", []) or [])
+
+    final: Dict[str, Any] = {}
+    for k, v in proposed.items():
+        if k in user_pinned:
+            continue
+        if isinstance(v, dict):
+            # per-server
+            sub_old = old_caps.get(k, {}) if isinstance(old_caps.get(k), dict) else {}
+            sub_final: Dict[str, int] = {}
+            for server, new_val in v.items():
+                key = f"{k}.{server}"
+                if key in user_pinned:
+                    continue
+                old_val = int(sub_old.get(server, 0))
+                chosen, reason = _apply_one(key, old_val, int(new_val), cooldowns, freezes, now)
+                sub_final[server] = chosen
+                if reason in ("tighten", "loosen", "init") and chosen != old_val:
+                    cooldowns[key] = {"sessions_remaining": COOLDOWN_SESSIONS}
+            if sub_final:
+                final[k] = sub_final
+        else:
+            old_val = int(old_caps.get(k, 0)) if isinstance(old_caps.get(k), (int, float)) else 0
+            chosen, reason = _apply_one(k, old_val, int(v), cooldowns, freezes, now)
+            final[k] = chosen
+            if reason in ("tighten", "loosen", "init") and chosen != old_val:
+                cooldowns[k] = {"sessions_remaining": COOLDOWN_SESSIONS}
+
+    new_state = dict(state)
+    new_state["caps"] = final
+    new_state["cooldowns"] = cooldowns
+    return final, new_state
+
+
+def apply_loss_freezes(
+    state: Dict[str, Any],
+    losses: List[Dict[str, Any]],
+    now: datetime | None = None,
+) -> Dict[str, Any]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    until = (now + timedelta(days=LOSS_FREEZE_DAYS)).isoformat()
+    freezes = dict(state.get("freezes", {}) or {})
+    for loss in losses:
+        det = loss.get("detector", "")
+        if det == "truncation_requery" or det == "error_after_cap":
+            server = loss.get("server")
+            if server:
+                freezes[f"MAX_MCP_OUTPUT_TOKENS.{server}"] = {"until": until, "reason": det}
+        elif det == "mid_code_ending":
+            freezes["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = {"until": until, "reason": det}
+        elif det == "compact_after_big_result":
+            freezes["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = {"until": until, "reason": det}
+    state["freezes"] = freezes
+    return state
+
+
+# ─────────────────── main ───────────────────
+
+
+def _print_diff(old_caps: Dict[str, Any], new_caps: Dict[str, Any]) -> None:
+    print("\n-- proposed cap diff --")
+    keys = sorted(set(old_caps) | set(new_caps))
+    for k in keys:
+        o = old_caps.get(k)
+        n = new_caps.get(k)
+        if isinstance(n, dict) or isinstance(o, dict):
+            o = o or {}
+            n = n or {}
+            servers = sorted(set(o) | set(n))
+            for s in servers:
+                ov = o.get(s, "—")
+                nv = n.get(s, "—")
+                marker = " " if ov == nv else "*"
+                print(f"  {marker} {k}.{s}: {ov} → {nv}")
+        else:
+            marker = " " if o == n else "*"
+            print(f"  {marker} {k}: {o} -> {n}")
+    print()
+
+
+def main(argv: List[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="tuner")
+    ap.add_argument("--first-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--corpus-root", default=DEFAULT_CORPUS_ROOT)
+    ap.add_argument("--home", default=DEFAULT_HOME)
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    home = args.home
+    os.makedirs(home, exist_ok=True)
+    applied_path = os.path.join(home, "applied.json")
+    settings_path = os.path.join(home, "auto-settings.json")
+
+    if args.reset:
+        for fn in ("applied.json", "auto-settings.json", "sessions.jsonl", "losses.jsonl"):
+            p = os.path.join(home, fn)
+            if os.path.exists(p):
+                os.unlink(p)
+        print("[tuner] reset complete")
+        return 0
+
+    state = load_state(applied_path)
+
+    if args.status:
+        print(f"version: {state.get('version')}")
+        print(f"last_tune_at: {state.get('last_tune_at')}")
+        print(f"effective_n: {state.get('effective_n', 0):.1f}")
+        print(f"confidence: {state.get('confidence', 0):.2f}")
+        print(f"caps: {state.get('caps')}")
+        print(f"freezes: {state.get('freezes')}")
+        print(f"user_pinned: {state.get('user_pinned')}")
+        return 0
+
+    log.info("scanning corpus at %s", args.corpus_root)
+    if not os.path.exists(args.corpus_root):
+        log.warning("corpus root missing — writing baseline-only settings")
+        stats = {"out_tokens": [], "mcp_sizes": {}, "ctx_pcts": [], "events": [], "effective_n": 0.0}
+    else:
+        stats = collect_samples(args.corpus_root, mcp_allow=DEFAULT_MCP_ALLOW)
+
+    proposed = compute_caps_per_setting(stats)
+    losses = detect_all(stats["events"], capped_tools=())
+    state = apply_loss_freezes(state, losses)
+
+    final, state = apply_hysteresis_cooldown_freeze(state, proposed)
+    state["effective_n"] = stats["effective_n"]
+    state["confidence"] = confidence(stats["effective_n"])
+    state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
+
+    if args.dry_run:
+        _print_diff(load_state(applied_path).get("caps", {}), final)
+        print(f"effective_n: {stats['effective_n']:.1f}  confidence: {state['confidence']:.2f}")
+        print(f"losses detected: {len(losses)}")
+        return 0
+
+    write_settings(settings_path, final)
+    save_state(applied_path, state)
+    log.info("wrote %s and %s", settings_path, applied_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

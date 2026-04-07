@@ -91,6 +91,37 @@ User's own `CLAUDE.md` always takes precedence.
 
 ---
 
+## Auto-tuner (v0.3.0)
+
+Recency-weighted auto-tuner that reads your entire session corpus and picks the
+most aggressive caps your data actually supports. Runs in the background via a
+SessionStart hook, fail-open, self-correcting.
+
+```
+python -m tuner.tuner --dry-run     # preview proposed caps vs current state
+python -m tuner.tuner                # apply (writes auto-settings.json)
+python -m tuner.tuner --status       # current caps, freezes, pinned settings
+python -m tuner.tuner --reset        # wipe tuner state, restore defaults
+```
+
+Highlights:
+- **Recency weighting** (half-life 14d; 7d for context-compact behavior) —
+  recent habits dominate, old sessions fade.
+- **Confidence-driven aggression** — new users get conservative caps, heavy
+  users get tight ones.
+- **Hysteresis** — no oscillation. Tighten needs >=10% change, loosen >=5%.
+- **Loss detection** — truncation requeries, "to be continued" endings,
+  autocompact after big tool results all freeze the offending setting for 14
+  days.
+- **Per-MCP-server awareness** — scoped to the servers you actually have
+  installed, not your whole history.
+- **Floors** — no setting can ever go below a hardcoded safe floor.
+- **User pinning** — anything you set in your personal `~/.claude/settings.json`
+  is detected and never touched.
+
+State lives in `~/.claude/tokenomy/`: `applied.json`, `auto-settings.json`,
+`sessions.jsonl`, `losses.jsonl`, `tuner.log`.
+
 ## Analyzer (v0.2.0)
 
 Retrospective analysis of every Claude Code session you've ever run. Walks
