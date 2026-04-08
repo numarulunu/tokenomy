@@ -220,27 +220,31 @@ def collect_recent_messages(since_hours: int, pricing: dict):
     return items
 
 
-def current_block(pricing: dict):
+def current_block_and_burn(pricing: dict):
     """
-    Compute current 5h block per ccusage spec.
-    Returns (block_start_utc, block_cost, time_left_seconds) or (None, 0.0, 0).
+    Single filesystem walk, returns everything the statusline needs:
+      (block_start_utc, block_cost, time_left_seconds, burn_rate_60m_usd_per_hr)
+
+    Before this refactor, `current_block` walked every transcript file under
+    ~/.claude/projects/ AND `burn_rate` walked them again — the statusline
+    renders every few seconds, so duplicated I/O was pushing render past
+    Claude Code's output timeout and corrupting ANSI output mid-flush.
+    Now we share the walk; both values come from one sorted message list.
     """
-    # Pull a generous window so we catch the block start even if it began >5h ago
-    # (ccusage aligns to hour so we look back up to ~10h to be safe).
+    # Pull 10h of messages so we can still detect a block that started >5h ago.
     msgs = collect_recent_messages(BLOCK_HOURS * 2, pricing)
     if not msgs:
-        return None, 0.0, 0
+        return None, 0.0, 0, 0.0
 
-    # Walk messages forward, grouping into blocks.
-    block_start = None
-    block_cost = 0.0
-    last_ts = None
     gap = timedelta(hours=BLOCK_HOURS)
     dur = timedelta(hours=BLOCK_HOURS)
 
     def floor_hour(dt: datetime) -> datetime:
         return dt.replace(minute=0, second=0, microsecond=0)
 
+    block_start = None
+    block_cost = 0.0
+    last_ts = None
     for ts, c in msgs:
         new_block = (
             block_start is None
@@ -253,48 +257,33 @@ def current_block(pricing: dict):
         block_cost += c
         last_ts = ts
 
-    if block_start is None:
-        return None, 0.0, 0
     now = datetime.now(timezone.utc)
-    elapsed = now - block_start
-    if elapsed >= dur:
-        # Block expired, no current block
-        return None, 0.0, 0
-    time_left = int((dur - elapsed).total_seconds())
-    return block_start, block_cost, time_left
+    if block_start is None or (now - block_start) >= dur:
+        block_start_ret, block_cost_ret, time_left = None, 0.0, 0
+    else:
+        elapsed = now - block_start
+        time_left = int((dur - elapsed).total_seconds())
+        block_start_ret, block_cost_ret = block_start, block_cost
+
+    # Rolling 60m burn — reuse the same sorted message list.
+    burn_cutoff = now - timedelta(hours=1)
+    burn = sum(c for ts, c in msgs if ts >= burn_cutoff)
+
+    return block_start_ret, block_cost_ret, time_left, burn
+
+
+def current_block(pricing: dict):
+    """Back-compat shim — returns the first 3 fields of current_block_and_burn."""
+    bs, bc, tl, _ = current_block_and_burn(pricing)
+    return bs, bc, tl
 
 
 def burn_rate(block_start, block_cost, pricing: dict | None = None) -> float:
-    """
-    Return the burn rate as a rolling 60-minute window of real spend.
-
-    ccusage's original formula was `block_cost / hours_since_block_start`,
-    which is an average that only decays as the 5h block ages and hides
-    the user's actual current pace. We instead sum the cost of every
-    message in the last 60 minutes — that's what the user "feels" when
-    they look at the bar and wonder 'am I burning hard right now'.
-
-    `block_start` and `block_cost` are kept as parameters for signature
-    compatibility with the existing call site; they are unused here.
-    """
+    """Back-compat shim — walks once via current_block_and_burn."""
     if pricing is None:
         return 0.0
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
-    total = 0.0
-    seen: set = set()
-    for p in all_transcripts():
-        try:
-            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
-            if mtime < cutoff:
-                continue
-        except OSError:
-            continue
-        for ts, model, usage, embedded in iter_transcript_messages(p, seen):
-            ts_utc = ts.astimezone(timezone.utc)
-            if ts_utc < cutoff:
-                continue
-            total += embedded if isinstance(embedded, (int, float)) and embedded > 0 else cost_from_usage(usage, model, pricing)
-    return total
+    _, _, _, burn = current_block_and_burn(pricing)
+    return burn
 
 
 # ---------- context ----------
@@ -389,8 +378,7 @@ def render(payload: dict, pricing: dict) -> str:
 
     session_cost = float((payload.get("cost") or {}).get("total_cost_usd") or 0)
     today = today_cost(pricing)
-    block_start, block_cost, time_left = current_block(pricing)
-    rate = burn_rate(block_start, block_cost, pricing)
+    block_start, block_cost, time_left, rate = current_block_and_burn(pricing)
 
     ctx_tokens = last_context_tokens(payload.get("transcript_path", ""))
     limit = context_limit(model_id)
