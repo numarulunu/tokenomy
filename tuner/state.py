@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "0.3.0"
+SCHEMA_VERSION = "0.3.1"
 
 
 def empty_state() -> Dict[str, Any]:

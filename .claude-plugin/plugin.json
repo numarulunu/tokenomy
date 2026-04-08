@@ -1,6 +1,6 @@
 {
   "name": "tokenomy",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Cut Claude Code token burn 80%+ via env vars, hooks, statusline, auto-tuner, and project templates. Includes a recency-weighted auto-tuner that learns your habits and self-corrects caps on loss detection.",
   "author": {
     "name": "Ionut Rosu",

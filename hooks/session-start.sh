@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # tokenomy SessionStart hook — spawn tuner in background if stale. Fail-open, <50ms.
+# Keep TOKENOMY_VERSION in sync with .claude-plugin/plugin.json — test_version_sync guards this.
 set +e
+TOKENOMY_VERSION="0.3.1"
 HOME_DIR="${TOKENOMY_HOME:-$HOME/.claude/tokenomy}"
 APPLIED="$HOME_DIR/applied.json"
 LOG="$HOME_DIR/tuner.log"
@@ -13,6 +15,11 @@ FLAG=""
 if [ ! -f "$APPLIED" ]; then
   NEED=1
   FLAG="--first-run"
+elif ! grep -q "\"version\": \"$TOKENOMY_VERSION\"" "$APPLIED" 2>/dev/null; then
+  # Version mismatch — tuner code is newer than applied.json. Force a run so
+  # existing users upgrading from an older tokenomy get the new merge/format
+  # applied immediately instead of waiting up to 3 days for the staleness gate.
+  NEED=1
 elif [ -n "$(find "$APPLIED" -mtime +3 2>/dev/null)" ]; then
   NEED=1
 fi
