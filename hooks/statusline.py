@@ -194,7 +194,7 @@ def today_cost(pricing: dict) -> float:
             ts_local = ts.astimezone(now_local.tzinfo)
             if ts_local < day_start or ts_local >= day_end:
                 continue
-            total += embedded if isinstance(embedded, (int, float)) else cost_from_usage(usage, model, pricing)
+            total += embedded if isinstance(embedded, (int, float)) and embedded > 0 else cost_from_usage(usage, model, pricing)
     return total
 
 
@@ -214,7 +214,7 @@ def collect_recent_messages(since_hours: int, pricing: dict):
             ts_utc = ts.astimezone(timezone.utc)
             if ts_utc < cutoff:
                 continue
-            c = embedded if isinstance(embedded, (int, float)) else cost_from_usage(usage, model, pricing)
+            c = embedded if isinstance(embedded, (int, float)) and embedded > 0 else cost_from_usage(usage, model, pricing)
             items.append((ts_utc, c))
     items.sort(key=lambda x: x[0])
     return items
@@ -264,13 +264,37 @@ def current_block(pricing: dict):
     return block_start, block_cost, time_left
 
 
-def burn_rate(block_start, block_cost) -> float:
-    if not block_start or block_cost <= 0:
+def burn_rate(block_start, block_cost, pricing: dict | None = None) -> float:
+    """
+    Return the burn rate as a rolling 60-minute window of real spend.
+
+    ccusage's original formula was `block_cost / hours_since_block_start`,
+    which is an average that only decays as the 5h block ages and hides
+    the user's actual current pace. We instead sum the cost of every
+    message in the last 60 minutes — that's what the user "feels" when
+    they look at the bar and wonder 'am I burning hard right now'.
+
+    `block_start` and `block_cost` are kept as parameters for signature
+    compatibility with the existing call site; they are unused here.
+    """
+    if pricing is None:
         return 0.0
-    elapsed = (datetime.now(timezone.utc) - block_start).total_seconds() / 3600
-    if elapsed <= 0:
-        return 0.0
-    return block_cost / elapsed
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    total = 0.0
+    seen: set = set()
+    for p in all_transcripts():
+        try:
+            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            if mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        for ts, model, usage, embedded in iter_transcript_messages(p, seen):
+            ts_utc = ts.astimezone(timezone.utc)
+            if ts_utc < cutoff:
+                continue
+            total += embedded if isinstance(embedded, (int, float)) and embedded > 0 else cost_from_usage(usage, model, pricing)
+    return total
 
 
 # ---------- context ----------
@@ -366,7 +390,7 @@ def render(payload: dict, pricing: dict) -> str:
     session_cost = float((payload.get("cost") or {}).get("total_cost_usd") or 0)
     today = today_cost(pricing)
     block_start, block_cost, time_left = current_block(pricing)
-    rate = burn_rate(block_start, block_cost)
+    rate = burn_rate(block_start, block_cost, pricing)
 
     ctx_tokens = last_context_tokens(payload.get("transcript_path", ""))
     limit = context_limit(model_id)
