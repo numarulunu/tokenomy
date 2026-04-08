@@ -26,6 +26,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Optional tokenomy currency override. Imported defensively so a missing
+# tuner package (e.g. statusline run outside the plugin) still works.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tuner.currency import load_currency  # type: ignore
+except Exception:  # pragma: no cover - fail-open
+    def load_currency() -> dict:
+        return {"code": "USD", "symbol": "$", "rate_to_usd": 1.0}
+
 # --- stdout utf-8 (Windows cp1252 chokes on emoji) ---
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -304,8 +313,13 @@ def context_limit(model_id: str) -> int:
 
 # ---------- formatting ----------
 
+_CURRENCY = {"code": "USD", "symbol": "$", "rate_to_usd": 1.0}
+
+
 def fmt_money(v: float) -> str:
-    return f"${v:.2f}"
+    rate = float(_CURRENCY.get("rate_to_usd", 1.0))
+    symbol = str(_CURRENCY.get("symbol", "$"))
+    return f"{symbol}{v * rate:.2f}"
 
 
 def fmt_time_left(seconds: int) -> str:
@@ -355,7 +369,7 @@ def render(payload: dict, pricing: dict) -> str:
         f" / {fmt_money(today)} today"
         f" / {fmt_money(block_cost)} block ({fmt_time_left(time_left)})"
     )
-    burn_section = f"{fmt_money(rate)}/hr" if rate > 0 else "$0.00/hr"
+    burn_section = f"{fmt_money(rate)}/hr" if rate > 0 else f"{fmt_money(0)}/hr"
 
     return (
         f"\U0001F916 {name} | "
@@ -374,6 +388,11 @@ def main() -> int:
         sys.stdout.write("tokenomy")
         return 0
     pricing = load_pricing()
+    global _CURRENCY
+    try:
+        _CURRENCY = load_currency()
+    except Exception:
+        pass  # fail-open to USD
     sys.stdout.write(render(payload, pricing))
     return 0
 
