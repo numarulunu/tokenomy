@@ -3,7 +3,7 @@
 Tokenomy native statusline — minimalist ccusage-inspired.
 
 Output format:
-  🤖 <Model> | 💰 €<session> / €<today> / €<block> (Xh left) | 🔥 €<rate>/hr | 🧠 <Nk> (<pct>%)
+  🤖 <Model> | 💰 €<session> session / €<today> today / €<block> block (Xh left) | 🔥 €<rate>/hr | 🧠 <Nk> (<pct>%)
 
 Design:
   - Reads session JSON from stdin (Claude Code statusLine contract).
@@ -369,11 +369,10 @@ def render(payload: dict, pricing: dict) -> str:
     pct = int(round(100 * ctx_tokens / limit)) if limit else 0
     ctx_str = f"{fmt_tokens(ctx_tokens)} ({pct}%)" if ctx_tokens else "N/A"
 
-    # Minimalist: drop the "session / today / block" labels — order is enough.
     cost_section = (
-        f"{fmt_money(session_cost)}"
-        f" / {fmt_money(today)}"
-        f" / {fmt_money(block_cost)} ({fmt_time_left(time_left)})"
+        f"{fmt_money(session_cost)} session"
+        f" / {fmt_money(today)} today"
+        f" / {fmt_money(block_cost)} block ({fmt_time_left(time_left)})"
     )
     burn_section = f"{fmt_money(rate)}/hr" if rate > 0 else f"{fmt_money(0)}/hr"
 
