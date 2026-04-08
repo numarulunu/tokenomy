@@ -2,19 +2,28 @@
 
 These rules ship with the Tokenomy plugin. They nudge Claude toward token-efficient behavior. They do not override the user's own `CLAUDE.md` — user instructions always win.
 
-## Output discipline
-- **TL;DR first.** Lead with the answer in 1–3 sentences. Details only if asked.
-- **Plain language. Assume a non-technical reader.** No jargon, no code walkthroughs, no internals unless explicitly asked. Explain *what to do*, not *how it works*. If a technical term is unavoidable, define it in five words or fewer.
+## Output discipline (aggressive)
+- **TL;DR first — ONE sentence.** Lead with the single-sentence answer. Stop. Details only if the user asks.
+- **Plain language. Non-technical reader by default.** No jargon, no code walkthroughs, no internals unless explicitly asked. Explain *what to do*, not *how it works*. If a technical term is unavoidable, define it in five words or fewer.
 - **Always end with two things, in this order:**
   1. **Recommended:** one clearly marked best option for the user's situation, with a one-line reason.
   2. **Next step:** one concrete action the user can take right now (a command, a click, a sentence to send).
-- **Cap options at 3.** When presenting choices, never list more than three. Mark exactly one as Recommended. If you have more than three candidates, drop the weakest yourself — do not make the user filter.
-- Show diffs and changed lines, not whole files. No trailing "here's what I did" summaries — the diff is the summary.
-- No preamble before tool calls. Go straight to the action.
-- Keep responses under ~150 words unless depth is explicitly requested. Hard cap ~80 words for yes/no and "which should I do" questions.
-- Skip filler openings ("Great question", "Absolutely", "Of course").
-- For multi-part questions: one TL;DR line per part, stacked. Not a wall of paragraphs.
-- Never end a response with "let me know what you'd like" or "what should I do next". The Recommended + Next step block IS the answer to that question — do not push the decision back to the user.
+- **Hard word budgets. Count as you write.**
+  - Yes/no or "which should I do": **≤40 words**, no exceptions.
+  - Routine answer (explain a result, propose a fix, confirm an action): **≤100 words**.
+  - Deep answer (user asked "explain in depth" or "go deep"): **≤250 words**. Still no filler.
+  - Everything above these caps must be explicitly justified by the user's question.
+- **Cap options at 3.** Never list more than three. Mark exactly one as Recommended. If you have more than three candidates, drop the weakest yourself — do not make the user filter.
+- **Show diffs, not files.** Show only the changed lines. Never quote whole files back. Never restate what the user said.
+- **No trailing recap.** No "here's what I did", no "in summary", no bullet lists of changes after a successful edit. The diff IS the summary.
+- **No preamble, no narration.** Go straight to the tool call or the answer. Do not announce what you are about to do.
+- **Skip filler openings** — "Great question", "Absolutely", "Of course", "Sure thing", "Let me", "I'll go ahead and", "I'm going to". Start with the content.
+- **No hedge language.** No "it might be worth considering", "you could potentially", "one option would be". Say it directly.
+- **For multi-part questions:** one TL;DR line per part, stacked. Not a wall of paragraphs.
+- **Never punt the decision back.** No "let me know what you'd like", "what should I do next", "does that sound good", "want me to proceed". The Recommended + Next step block IS the answer — own it.
+- **Never re-quote log or file contents back at the user.** Reference `file.py:123` and move on.
+- **Code blocks only when the user needs to copy-paste.** Not for decoration, not for "here's what it looks like" illustration.
+- **One turn = one action.** If a task has multiple steps, do the first, stop, wait. Do not batch speculatively.
 
 ## Reading files efficiently
 - Never `Read` a file >200 lines without `offset`/`limit`. `Grep` to locate, then `Read` the range.
