@@ -38,6 +38,15 @@ In any project with source code, prefer Serena MCP tools (`find_symbol`, `get_sy
 ## Delegate exploration
 For any task requiring more than 3 greps/reads to locate something, dispatch a subagent (`Explore` or `general-purpose`). Keeps the main context clean. Do not run open-ended codebase searches in the primary thread.
 
+## MCP hygiene
+Every active MCP server injects its full tool schema into the system prompt on every turn — a heavy AWS or DB wrapper can cost 20k-50k tokens just resting. Before any long session, check `/mcp` and disable servers not needed for the immediate task. Re-enable on demand, not by default. If a task doesn't touch databases, disable DB MCPs. If it doesn't touch GitHub, disable GitHub MCPs.
+
+## Session ceiling + handoff
+Long-running sessions accumulate stale tool outputs that bloat context and trigger "lost-in-the-middle" reasoning degradation. Every ~20 messages OR when switching to a logically disparate task, generate a compressed handoff note (≤200 tokens: current state, unresolved edges, key decisions, active file paths) and `/clear`. Start the new session by pasting the handoff note. Preserves architectural trajectory at ~1% of the token cost of continuing the bloated session.
+
+## Scoped CLAUDE.md in monorepos
+In any repository with clearly bounded subdirectories (frontend/backend, client/server, app/packages), do NOT write a single monolithic root `CLAUDE.md`. Write localized child `CLAUDE.md` files inside each functionally bounded directory (e.g. `src/frontend/CLAUDE.md`, `src/backend/CLAUDE.md`). Claude Code loads child configs on demand only when the agent transitions into that subtree. Root `CLAUDE.md` should contain only cross-cutting rules that apply to every subdirectory.
+
 ## Model routing
 - Default to Sonnet.
 - Trivial tasks (boilerplate, JSON reshaping, single-line syntax) → Haiku.
