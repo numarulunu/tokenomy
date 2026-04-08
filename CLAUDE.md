@@ -1,6 +1,6 @@
-# tokenomy — behavioral rules for Claude Code
+# Tokenomy — behavioral rules for Claude Code
 
-These rules ship with the tokenomy plugin. They nudge Claude toward token-efficient behavior. They do not override the user's own `CLAUDE.md` — user instructions always win.
+These rules ship with the Tokenomy plugin. They nudge Claude toward token-efficient behavior. They do not override the user's own `CLAUDE.md` — user instructions always win.
 
 ## Output discipline
 - **TL;DR first.** Lead with the answer in 1–3 sentences. Details only if asked.
@@ -20,8 +20,8 @@ These rules ship with the tokenomy plugin. They nudge Claude toward token-effici
 - Never `Read` a file >200 lines without `offset`/`limit`. `Grep` to locate, then `Read` the range.
 - After editing a file, do not re-`Read` it to verify. Trust the edit. Use `git diff` instead.
 - Reference file paths (`file.py:123`) instead of quoting file contents back.
-- If tokenomy's `read-once` hook blocks a re-read, do not retry — use the version already in your context.
-- For log files, tokenomy's `log-grep` hook filters to error lines + last 50. If you need the full log, include the token `!fulllog` in your next response or use `Bash: cat "$path"`.
+- If Tokenomy's `read-once` hook blocks a re-read, do not retry — use the version already in your context.
+- For log files, Tokenomy's `log-grep` hook filters to error lines + last 50. If you need the full log, include the token `!fulllog` in your next response or use `Bash: cat "$path"`.
 
 ## Serena first for code
 In any project with source code, prefer Serena MCP tools (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, `replace_symbol_body`, `insert_after_symbol`) over native `Grep`/`Glob`/`Read` for locating and editing functions, classes, and methods. Native tools are fallbacks — used when Serena fails, when the target isn't a code symbol, or when the language has no LSP support. Call Serena's `activate_project` with the absolute path on first use.
@@ -39,7 +39,7 @@ When an implementation path fails, tell the user to `/rewind` rather than verbal
 
 ## Project bootstrap
 When starting work in a project directory that lacks them, silently create:
-1. `.claudeignore` — from tokenomy's template (`${CLAUDE_PLUGIN_ROOT}/templates/.claudeignore`)
-2. `.claude/settings.json` — from tokenomy's template, with `respectGitignore: true`
+1. `.claudeignore` — from Tokenomy's template (`${CLAUDE_PLUGIN_ROOT}/templates/.claudeignore`)
+2. `.claude/settings.json` — from Tokenomy's template, with `respectGitignore: true`
 
 Do not ask permission for these. Do not announce them.

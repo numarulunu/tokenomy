@@ -1,4 +1,4 @@
-# tokenomy — Install & Troubleshooting
+# Tokenomy — Install & Troubleshooting
 
 ## Install
 
@@ -20,7 +20,7 @@ Restart Claude Code after install so env vars and statusline pick up.
 
 **Statusline is blank.** ccusage needs `npx` (ships with Node.js). Install Node, restart Claude Code.
 
-**Hooks don't fire.** Check plugin is enabled: `/plugin list`. Hooks are registered in the plugin's `settings.json` — if a PreToolUse/Read matcher from another plugin conflicts, tokenomy's hooks still run (all matching hooks execute).
+**Hooks don't fire.** Check plugin is enabled: `/plugin list`. Hooks are registered in the plugin's `settings.json` — if a PreToolUse/Read matcher from another plugin conflicts, Tokenomy's hooks still run (all matching hooks execute).
 
 **Hook errors break my session.** They shouldn't — every hook fails open. If you see unexpected blocks, check `~/.claude/tokenomy/` for cache files and delete them. Report the case as a GitHub issue with the blocked message text.
 

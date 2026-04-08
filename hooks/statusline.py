@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-tokenomy native statusline — 1:1 ccusage clone.
+Tokenomy native statusline — minimalist ccusage-inspired.
 
-Output format (matches ccusage statusline exactly):
-  🤖 <Model> | 💰 $<session> session / $<today> today / $<block> block (Xh Ym left) | 🔥 $<rate>/hr | 🧠 <tokens> (<pct>%)
+Output format:
+  🤖 <Model> | 💰 €<session> / €<today> / €<block> (Xh left) | 🔥 €<rate>/hr | 🧠 <Nk> (<pct>%)
 
 Design:
   - Reads session JSON from stdin (Claude Code statusLine contract).
@@ -319,23 +319,28 @@ _CURRENCY = {"code": "USD", "symbol": "$", "rate_to_usd": 1.0}
 def fmt_money(v: float) -> str:
     rate = float(_CURRENCY.get("rate_to_usd", 1.0))
     symbol = str(_CURRENCY.get("symbol", "$"))
-    return f"{symbol}{v * rate:.2f}"
+    # Minimalist: integer euros/dollars, no decimals.
+    return f"{symbol}{int(round(v * rate))}"
 
 
 def fmt_time_left(seconds: int) -> str:
     if seconds <= 0:
-        return "0m left"
+        return "0m"
     h = seconds // 3600
     m = (seconds % 3600) // 60
-    if h and m:
-        return f"{h}h {m}m left"
-    if h:
-        return f"{h}h left"
-    return f"{m}m left"
+    # Minimalist: prefer single-unit (5h or 30m), never "3h 7m".
+    if h >= 1:
+        return f"{h}h"
+    return f"{m}m"
 
 
 def fmt_tokens(n: int) -> str:
-    return f"{n:,}"
+    # Minimalist: 180,349 → "180k", 1,250,000 → "1.2M".
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n // 1_000}k"
+    return str(n)
 
 
 def model_display(model_id: str, fallback: str) -> str:
@@ -364,10 +369,11 @@ def render(payload: dict, pricing: dict) -> str:
     pct = int(round(100 * ctx_tokens / limit)) if limit else 0
     ctx_str = f"{fmt_tokens(ctx_tokens)} ({pct}%)" if ctx_tokens else "N/A"
 
+    # Minimalist: drop the "session / today / block" labels — order is enough.
     cost_section = (
-        f"{fmt_money(session_cost)} session"
-        f" / {fmt_money(today)} today"
-        f" / {fmt_money(block_cost)} block ({fmt_time_left(time_left)})"
+        f"{fmt_money(session_cost)}"
+        f" / {fmt_money(today)}"
+        f" / {fmt_money(block_cost)} ({fmt_time_left(time_left)})"
     )
     burn_section = f"{fmt_money(rate)}/hr" if rate > 0 else f"{fmt_money(0)}/hr"
 
@@ -385,7 +391,7 @@ def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        sys.stdout.write("tokenomy")
+        sys.stdout.write("Tokenomy")
         return 0
     pricing = load_pricing()
     global _CURRENCY
@@ -401,5 +407,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        sys.stdout.write("tokenomy")
+        sys.stdout.write("Tokenomy")
         sys.exit(0)
