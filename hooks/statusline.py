@@ -319,8 +319,12 @@ _CURRENCY = {"code": "USD", "symbol": "$", "rate_to_usd": 1.0}
 def fmt_money(v: float) -> str:
     rate = float(_CURRENCY.get("rate_to_usd", 1.0))
     symbol = str(_CURRENCY.get("symbol", "$"))
-    # Minimalist: integer euros/dollars, no decimals.
-    return f"{symbol}{int(round(v * rate))}"
+    amt = v * rate
+    # Minimalist: one decimal under 10 (€1.4, €0.8), integer at/above 10 (€92).
+    # Integer-only stripped too much precision from small values like burn rate.
+    if amt < 10:
+        return f"{symbol}{amt:.1f}"
+    return f"{symbol}{int(round(amt))}"
 
 
 def fmt_time_left(seconds: int) -> str:
