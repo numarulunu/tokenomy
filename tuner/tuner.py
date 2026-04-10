@@ -57,6 +57,7 @@ def collect_samples(
     now: datetime | None = None,
     mcp_allow: set[str] | None = None,
     capped_tools: Iterable[str] = (),
+    last_tune_at: str | None = None,
 ) -> Dict[str, Any]:
     """Walk corpus, return weighted samples per setting + per-MCP-server."""
     if now is None:
@@ -64,6 +65,7 @@ def collect_samples(
     out_tokens: List[Tuple[float, float]] = []
     mcp_sizes: Dict[str, List[Tuple[float, float]]] = {}
     ctx_pcts: List[Tuple[float, float]] = []
+    pre_cap_ctx_pcts: List[Tuple[float, float]] = []
     all_losses: List[Dict[str, Any]] = []
 
     name_by_id: Dict[str, str] = {}
@@ -108,6 +110,15 @@ def collect_samples(
             ctx_w = max(ctx_w, 0.01)
             pct = min(100.0, (max_ctx / 200_000.0) * 100.0)
             ctx_pcts.append((pct, ctx_w))
+            # Track pre-cap context for autocompact confound isolation
+            if last_tune_at and last_ts:
+                try:
+                    tune_dt = datetime.fromisoformat(last_tune_at.replace("Z", "+00:00"))
+                    sess_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                    if sess_dt < tune_dt:
+                        pre_cap_ctx_pcts.append((pct, ctx_w))
+                except (ValueError, AttributeError):
+                    pass
         # Run loss detectors per-session to avoid cross-session false positives
         session_losses = detect_all(ev_list, capped_tools=capped_tools)
         all_losses.extend(session_losses)
@@ -117,6 +128,7 @@ def collect_samples(
         "out_tokens": out_tokens,
         "mcp_sizes": mcp_sizes,
         "ctx_pcts": ctx_pcts,
+        "pre_cap_ctx_pcts": pre_cap_ctx_pcts,
         "losses": all_losses,
         "effective_n": eff_n,
     }
@@ -139,8 +151,12 @@ def compute_caps_per_setting(stats: Dict[str, Any]) -> Dict[str, Any]:
     # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE — p75 captures *typical* compact point,
     # not worst-case. Plus 10% headroom. Context samples use a shorter half-life
     # (7d) via pre-reweighting upstream; here we just take p75.
-    if stats["ctx_pcts"]:
-        p = weighted_percentile(stats["ctx_pcts"], 0.75)
+    # Prefer pre-cap context samples to avoid feedback confound
+    ctx_samples = stats.get("pre_cap_ctx_pcts", [])
+    if len(ctx_samples) < 20:
+        ctx_samples = stats["ctx_pcts"]  # fall back to full set
+    if ctx_samples:
+        p = weighted_percentile(ctx_samples, 0.75)
         caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = max(int(p + 10), FLOORS["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
     else:
         caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = 70
@@ -375,7 +391,12 @@ def main(argv: List[str] | None = None) -> int:
         else:
             _mcp_caps = state.get("caps", {}).get("MAX_MCP_OUTPUT_TOKENS", {})
             _capped_servers = set(_mcp_caps.keys()) if isinstance(_mcp_caps, dict) else set()
-            stats = collect_samples(args.corpus_root, mcp_allow=DEFAULT_MCP_ALLOW, capped_tools=_capped_servers)
+            stats = collect_samples(
+                args.corpus_root,
+                mcp_allow=DEFAULT_MCP_ALLOW,
+                capped_tools=_capped_servers,
+                last_tune_at=state.get("last_tune_at"),
+            )
 
         proposed = compute_caps_per_setting(stats)
         losses = stats["losses"]

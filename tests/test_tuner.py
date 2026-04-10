@@ -13,11 +13,12 @@ from tuner.tuner import (
 )
 
 
-def _stats(out=None, mcp=None, ctx=None, losses=None):
+def _stats(out=None, mcp=None, ctx=None, losses=None, pre_cap_ctx=None):
     return {
         "out_tokens": out or [],
         "mcp_sizes": mcp or {},
         "ctx_pcts": ctx or [],
+        "pre_cap_ctx_pcts": pre_cap_ctx or [],
         "losses": losses or [],
         "effective_n": sum(w for _, w in (out or [])),
     }
@@ -160,6 +161,26 @@ def test_control_loop_zeroes_cooldown_when_cap_below_usage():
     if cap_val > 0 and cap_val < 0.9 * rolling:
         state["cooldowns"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]["sessions_remaining"] = 0
     assert state["cooldowns"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]["sessions_remaining"] == 0
+
+
+def test_pre_cap_ctx_preferred_when_sufficient():
+    """When >=20 pre-cap ctx samples exist, use them for autocompact."""
+    pre = [(30.0, 1.0)] * 25  # 25 pre-cap samples at 30%
+    post = [(60.0, 1.0)] * 100  # 100 post-cap at 60%
+    stats = _stats(ctx=pre + post, pre_cap_ctx=pre)
+    caps = compute_caps_per_setting(stats)
+    # p75 of uniform 30% = 30, +10 = 40, floor is 25
+    assert caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == 40
+
+
+def test_pre_cap_ctx_falls_back_when_insufficient():
+    """When <20 pre-cap samples, fall back to full ctx set."""
+    pre = [(30.0, 1.0)] * 10  # only 10 < 20
+    all_ctx = pre + [(60.0, 1.0)] * 100
+    stats = _stats(ctx=all_ctx, pre_cap_ctx=pre)
+    caps = compute_caps_per_setting(stats)
+    # Falls back to full set: p75 of mixed distribution, dominated by 60% samples
+    assert caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] >= 60
 
 
 def test_lock_cleanup_removes_pid_file(tmp_path):
