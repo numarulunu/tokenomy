@@ -50,7 +50,9 @@ CTX_LIMIT_1M = 1_000_000
 
 MODEL_DISPLAY = {
     "claude-opus-4-6": "Opus 4.6",
+    "claude-opus-4-5": "Opus 4.5",
     "claude-sonnet-4-6": "Sonnet 4.6",
+    "claude-sonnet-4-5": "Sonnet 4.5",
     "claude-haiku-4-5": "Haiku 4.5",
     "claude-opus-4": "Opus 4",
     "claude-sonnet-4": "Sonnet 4",
@@ -68,18 +70,39 @@ def load_pricing() -> dict:
         return {}
 
 
+_PRICING_MATCH_WARNED: set = set()
+
+
 def pricing_for(model_id: str, pricing: dict, over_200k: bool) -> dict | None:
     if not model_id:
         return None
     key = model_id.lower()
-    # Longest-substring match so "claude-opus-4-6" beats "claude-opus-4"
-    best = None
-    for k in pricing:
-        if k in key and (best is None or len(k) > len(best)):
-            best = k
-    if best is None:
-        return None
-    entry = pricing[best]
+    # Exact match first; fall back to longest-substring so "claude-opus-4-6"
+    # beats "claude-opus-4". Warn once per (model_id, matched_key) when the
+    # match isn't exact — catches the case where a new model ID falls through
+    # to a shorter key that happens to be a substring.
+    if key in pricing:
+        entry = pricing[key]
+    else:
+        best = None
+        for k in pricing:
+            if k in key and (best is None or len(k) > len(best)):
+                best = k
+        if best is None:
+            return None
+        # A dated-version suffix like `claude-sonnet-4-5-20250929` legitimately
+        # falls back to `claude-sonnet-4-5` — that's the intended behavior of
+        # the substring matcher and does not deserve a warning. Only warn when
+        # the matched key is NOT a prefix of the received model id.
+        is_dated_suffix = key.startswith(best + "-") and key[len(best) + 1:].replace("-", "").isdigit()
+        if not is_dated_suffix:
+            warn_key = (key, best)
+            if warn_key not in _PRICING_MATCH_WARNED:
+                _PRICING_MATCH_WARNED.add(warn_key)
+                sys.stderr.write(
+                    f"[tokenomy] pricing fallback: {model_id!r} -> {best!r} (add exact key to pricing.json)\n"
+                )
+        entry = pricing[best]
     if over_200k and "tier_1m" in entry:
         return entry["tier_1m"]
     return entry
@@ -108,6 +131,132 @@ def cost_from_usage(usage: dict, model_id: str, pricing: dict) -> float:
 
 
 # ---------- transcript iteration ----------
+#
+# Unified message walker with per-file mtime cache.
+#
+# render() fires every few seconds. Without caching we'd re-read every .jsonl
+# under ~/.claude/projects on every call, which balloons with transcript
+# history and once corrupted ANSI output under load. The cache stores parsed
+# message tuples keyed by (file_path, mtime_ns). Only files whose mtime has
+# changed since the last render get re-read; stable historical files are
+# served straight from memory.
+#
+# Cached tuple shape (tiny — no cost baked in, so pricing changes are safe):
+#   (dedupe_key, ts_utc, model, in_tok, out_tok, cc5_tok, cr_tok, embedded)
+#
+# Dedupe runs across the full unified list at walk time, not per-aggregator,
+# so messages appearing in multiple transcript files are counted exactly once
+# per render regardless of which aggregator asks.
+
+_MSG_CACHE: dict = {}
+
+
+def _parse_file(path: Path) -> list:
+    """Parse one .jsonl file into a list of message tuples. No dedupe here."""
+    out = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = rec.get("message") if isinstance(rec.get("message"), dict) else None
+                usage = None
+                model = ""
+                msg_id = ""
+                if msg:
+                    usage = msg.get("usage")
+                    model = msg.get("model", "") or rec.get("model", "")
+                    msg_id = msg.get("id", "") or ""
+                if not usage:
+                    usage = rec.get("usage")
+                    model = model or rec.get("model", "")
+                if not usage:
+                    continue
+                req_id = rec.get("requestId") or rec.get("request_id") or ""
+                dedupe_key = (
+                    f"{msg_id}:{req_id}" if msg_id or req_id else rec.get("uuid", "")
+                )
+                ts_raw = rec.get("timestamp") or rec.get("time") or ""
+                ts = parse_ts(ts_raw)
+                if ts is None:
+                    continue
+                ts_utc = ts.astimezone(timezone.utc)
+                embedded = rec.get("costUSD")
+                if embedded is None and msg:
+                    embedded = msg.get("costUSD")
+                if not (isinstance(embedded, (int, float)) and embedded > 0):
+                    embedded = None
+                out.append((
+                    dedupe_key,
+                    ts_utc,
+                    model,
+                    int(usage.get("input_tokens", 0) or 0),
+                    int(usage.get("output_tokens", 0) or 0),
+                    int(usage.get("cache_creation_input_tokens", 0) or 0),
+                    int(usage.get("cache_read_input_tokens", 0) or 0),
+                    embedded,
+                ))
+    except OSError:
+        pass
+    return out
+
+
+def _walk_cached() -> list:
+    """One unified pass with mtime-keyed cache. Returns deduped flat list."""
+    if not PROJECTS_DIR.is_dir():
+        return []
+    paths = list(PROJECTS_DIR.rglob("*.jsonl"))
+    live_keys = set()
+    for p in paths:
+        key = str(p)
+        live_keys.add(key)
+        try:
+            mtime = p.stat().st_mtime_ns
+        except OSError:
+            continue
+        cached = _MSG_CACHE.get(key)
+        if cached is None or cached[0] != mtime:
+            _MSG_CACHE[key] = (mtime, _parse_file(p))
+    # Evict entries for files that disappeared
+    for stale in [k for k in _MSG_CACHE if k not in live_keys]:
+        del _MSG_CACHE[stale]
+    # Flatten + dedupe across the whole corpus
+    seen: set = set()
+    out: list = []
+    for _mtime, msgs in _MSG_CACHE.values():
+        for m in msgs:
+            dk = m[0]
+            if dk:
+                if dk in seen:
+                    continue
+                seen.add(dk)
+            out.append(m)
+    return out
+
+
+def _msg_cost(m: tuple, pricing: dict) -> float:
+    """Repricing from stored token counts. Intentionally ignores `embedded`
+    so every aggregator returns a consistent 'priced at current rates' figure —
+    prior asymmetry (today used embedded, all-time repriced) produced split-
+    brain numbers rendered side-by-side. Repricing wins because it's invariant
+    across pricing.json updates and stays correct when historical embedded
+    values reflect stale rate tables."""
+    _dk, _ts, model, in_tok, out_tok, cc5, cr, _embedded = m
+    if not model:
+        return 0.0
+    usage = {
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "cache_creation_input_tokens": cc5,
+        "cache_read_input_tokens": cr,
+    }
+    return cost_from_usage(usage, model, pricing)
+
 
 def iter_transcript_messages(path: Path, seen: set):
     """
@@ -178,49 +327,43 @@ def all_transcripts():
 
 
 # ---------- aggregators ----------
+#
+# All aggregators read from the unified _walk_cached() list. render() should
+# call _walk_cached() once and pass the result in — or call these with
+# msgs=None to let them fetch it themselves (used by standalone callers/tests).
 
-def today_cost(pricing: dict) -> float:
-    # Local calendar day, matches `ccusage daily` report exactly.
-    # Note: `ccusage statusline` shows a slightly higher figure (possibly rolling 24h
-    # or a different windowing heuristic); we match the daily report which is the
-    # documented aggregate.
+def today_cost(pricing: dict, msgs: list | None = None) -> float:
+    if msgs is None:
+        msgs = _walk_cached()
     now_local = datetime.now().astimezone()
     day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
     total = 0.0
-    seen: set = set()
-    for p in all_transcripts():
-        for ts, model, usage, embedded in iter_transcript_messages(p, seen):
-            ts_local = ts.astimezone(now_local.tzinfo)
-            if ts_local < day_start or ts_local >= day_end:
-                continue
-            total += embedded if isinstance(embedded, (int, float)) and embedded > 0 else cost_from_usage(usage, model, pricing)
+    for m in msgs:
+        ts_local = m[1].astimezone(now_local.tzinfo)
+        if day_start <= ts_local < day_end:
+            total += _msg_cost(m, pricing)
     return total
 
 
-def collect_recent_messages(since_hours: int, pricing: dict):
-    """Return list of (ts_utc, cost) for messages in the last `since_hours`, sorted ascending."""
+def all_time_cost(pricing: dict, msgs: list | None = None) -> float:
+    """Lifetime repriced cost across every cached transcript message."""
+    if msgs is None:
+        msgs = _walk_cached()
+    return sum(_msg_cost(m, pricing) for m in msgs)
+
+
+def collect_recent_messages(since_hours: int, pricing: dict, msgs: list | None = None):
+    """Return sorted (ts_utc, cost) list for messages in the last `since_hours`."""
+    if msgs is None:
+        msgs = _walk_cached()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    items = []
-    seen: set = set()
-    for p in all_transcripts():
-        try:
-            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
-            if mtime < cutoff:
-                continue
-        except OSError:
-            continue
-        for ts, model, usage, embedded in iter_transcript_messages(p, seen):
-            ts_utc = ts.astimezone(timezone.utc)
-            if ts_utc < cutoff:
-                continue
-            c = embedded if isinstance(embedded, (int, float)) and embedded > 0 else cost_from_usage(usage, model, pricing)
-            items.append((ts_utc, c))
+    items = [(m[1], _msg_cost(m, pricing)) for m in msgs if m[1] >= cutoff]
     items.sort(key=lambda x: x[0])
     return items
 
 
-def current_block_and_burn(pricing: dict):
+def current_block_and_burn(pricing: dict, msgs: list | None = None):
     """
     Single filesystem walk, returns everything the statusline needs:
       (block_start_utc, block_cost, time_left_seconds, burn_rate_60m_usd_per_hr)
@@ -232,7 +375,7 @@ def current_block_and_burn(pricing: dict):
     Now we share the walk; both values come from one sorted message list.
     """
     # Pull 10h of messages so we can still detect a block that started >5h ago.
-    msgs = collect_recent_messages(BLOCK_HOURS * 2, pricing)
+    msgs = collect_recent_messages(BLOCK_HOURS * 2, pricing, msgs=msgs)
     if not msgs:
         return None, 0.0, 0, 0.0
 
@@ -295,7 +438,10 @@ def last_context_tokens(transcript_path: str) -> int:
         with open(transcript_path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 262_144))
+            # 512KB tail covers ~8-16 typical assistant turns. Smaller windows
+            # could miss the last usage record if a huge inline tool result
+            # pushes it out of range on long sessions.
+            f.seek(max(0, size - 524_288))
             tail = f.read().decode("utf-8", errors="ignore")
     except OSError:
         return 0
@@ -376,9 +522,11 @@ def render(payload: dict, pricing: dict) -> str:
     model_id = model.get("id", "")
     name = model_display(model_id, model.get("display_name", ""))
 
-    session_cost = float((payload.get("cost") or {}).get("total_cost_usd") or 0)
-    today = today_cost(pricing)
-    block_start, block_cost, time_left, rate = current_block_and_burn(pricing)
+    # Single unified walk per render; all aggregators reuse the same list.
+    msgs = _walk_cached()
+    lifetime_cost = all_time_cost(pricing, msgs=msgs)
+    today = today_cost(pricing, msgs=msgs)
+    block_start, block_cost, time_left, rate = current_block_and_burn(pricing, msgs=msgs)
 
     ctx_tokens = last_context_tokens(payload.get("transcript_path", ""))
     limit = context_limit(model_id)
@@ -386,7 +534,7 @@ def render(payload: dict, pricing: dict) -> str:
     ctx_str = f"{fmt_tokens(ctx_tokens)} ({pct}%)" if ctx_tokens else "N/A"
 
     cost_section = (
-        f"{fmt_money(session_cost)} session"
+        f"{fmt_money(lifetime_cost)} total"
         f" / {fmt_money(today)} today"
         f" / {fmt_money(block_cost)} block ({fmt_time_left(time_left)})"
     )

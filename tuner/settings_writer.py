@@ -24,8 +24,6 @@ log = logging.getLogger(__name__)
 
 FLOORS = {
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": 4000,
-    "MAX_THINKING_TOKENS": 2000,
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": 25,
     "MAX_MCP_OUTPUT_TOKENS": 5000,
 }
 
@@ -34,12 +32,7 @@ FLOORS = {
 # tuned caps so they actually take effect.
 BASELINE_ENV: Dict[str, str] = {
     "ENABLE_TOOL_SEARCH": "true",
-    "MAX_THINKING_TOKENS": "8000",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-    "CLAUDE_CODE_DISABLE_BUG_COMMAND": "1",
-    "DISABLE_ERROR_REPORTING": "1",
-    "DISABLE_AUTOUPDATER": "1",
     "DISABLE_TELEMETRY": "1",
 }
 
