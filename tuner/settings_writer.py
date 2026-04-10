@@ -77,13 +77,17 @@ def build_env_block(caps: Dict[str, Any], per_server_supported: bool = False) ->
     return env
 
 
-def _atomic_write_json(path: str, data: Any) -> None:
+def _atomic_write_json(path: str, data: Any, sort_keys: bool = False) -> None:
+    """Atomic JSON write. Defaults to sort_keys=False because this is used
+    for the user's settings.json — alphabetizing on every run created noisy
+    cosmetic diffs in dot-file repos. Callers writing machine-only files
+    (like applied.json) can opt in with sort_keys=True."""
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".settings.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=True)
+            json.dump(data, f, indent=2, sort_keys=sort_keys)
         os.replace(tmp, path)
     except Exception:
         try:
@@ -142,9 +146,19 @@ def merge_into_user_settings(
 
     settings = _load_json(path)
 
-    # One-time backup before we first mutate the file.
+    # Backup: create on first run, rotate on version bump.
     if os.path.exists(path):
         backup = path + BACKUP_SUFFIX
+        prev_meta = settings.get(SENTINEL_KEY) if isinstance(settings.get(SENTINEL_KEY), dict) else {}
+        prev_version = prev_meta.get("version")
+        if os.path.exists(backup) and prev_version and prev_version != version:
+            # Version bump: archive old backup with version suffix
+            archived = f"{backup}.{prev_version}"
+            try:
+                os.rename(backup, archived)
+                log.info("rotated backup to %s", archived)
+            except OSError as e:
+                log.warning("could not rotate backup: %s", e)
         if not os.path.exists(backup):
             try:
                 shutil.copy2(path, backup)

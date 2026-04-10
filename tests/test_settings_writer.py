@@ -124,6 +124,24 @@ def test_merge_backup_is_one_time(tmp_path):
     assert _read(backup) == {"env": {"USER_KEY": "v1"}}
 
 
+def test_backup_rotated_on_version_bump(tmp_path):
+    """Version bump archives old backup with version suffix, creates fresh one."""
+    p = str(tmp_path / "settings.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"env": {"USER_KEY": "original"}}, f)
+
+    # First merge at v0.3.1
+    merge_into_user_settings(p, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000}, version="0.3.1")
+    backup = p + BACKUP_SUFFIX
+    assert os.path.exists(backup)
+
+    # Second merge at v0.4.0 — should rotate
+    merge_into_user_settings(p, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 9000}, version="0.4.0")
+    archived = backup + ".0.3.1"
+    assert os.path.exists(archived), "Old backup should be archived with version suffix"
+    assert os.path.exists(backup), "Fresh backup should exist"
+
+
 def test_merge_missing_file_creates_it(tmp_path):
     p = str(tmp_path / "settings.json")
     merge_into_user_settings(p, {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000}, baseline={})
