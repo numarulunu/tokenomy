@@ -20,24 +20,29 @@ elif ! grep -q "\"version\": \"$TOKENOMY_VERSION\"" "$APPLIED" 2>/dev/null; then
   # existing users upgrading from an older tokenomy get the new merge/format
   # applied immediately instead of waiting up to 3 days for the staleness gate.
   NEED=1
-elif [ -n "$(find "$APPLIED" -mtime +3 2>/dev/null)" ]; then
+elif [ "$(python -c "import os,time; print('stale' if time.time()-os.path.getmtime('$APPLIED') > 86400*3 else '')" 2>/dev/null)" = "stale" ]; then
+  # Python staleness gate — GNU find's -mtime misbehaves on Git Bash / MSYS
+  # under Windows drive-letter paths, so we use Python (already a hard dep).
   NEED=1
 fi
 [ "$NEED" = "1" ] || exit 0
 
 # Atomic acquire via mkdir (POSIX-portable, no TOCTOU window).
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-  AGE=$(( $(date +%s 2>/dev/null) - $(stat -c %Y "$LOCKDIR" 2>/dev/null || echo 0) ))
-  if [ "$AGE" -lt 300 ]; then
-    exit 0
+  # PID-based stale check: if the locking process is still alive, exit.
+  # Fail-open if pid file missing or kill -0 errors.
+  LOCK_PID=$(cat "$LOCKDIR/pid" 2>/dev/null | head -1)
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    exit 0  # process alive — lock is valid
   fi
-  # Stale lock — clear it and try once more. Still fail-open on any error.
+  # Process dead or no PID file — stale lock. Clear and retry once.
   rm -rf "$LOCKDIR" 2>/dev/null
   mkdir "$LOCKDIR" 2>/dev/null || exit 0
 fi
-# The hook shell only holds the lock long enough to spawn; the tuner clears
-# its own lock in a finally block. trap covers crash-on-spawn.
-trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+# NO trap on EXIT: the tuner's Python `finally` block is the sole lock
+# release point. A bash trap would clear LOCKDIR the instant this hook shell
+# exits — before the backgrounded tuner has acquired its guard — opening a
+# race window where a second session-start spawns a second tuner.
 
 TOKENOMY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Detach unconditionally; redirect handled by the outer subshell so the
@@ -45,6 +50,7 @@ TOKENOMY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 (
   cd "$TOKENOMY_DIR" || exit 0
   nohup python -m tuner.tuner $FLAG </dev/null >> "$LOG" 2>&1 &
+  echo $! > "$LOCKDIR/pid" 2>/dev/null
 ) >/dev/null 2>&1
 disown 2>/dev/null
 

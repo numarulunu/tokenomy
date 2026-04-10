@@ -404,11 +404,13 @@ def main(argv: List[str] | None = None) -> int:
         log.info("merged %d env keys into %s; wrote %s", len(merged), args.user_settings, applied_path)
         return 0
     finally:
-        # Always release the SessionStart hook's lock dir, even on crash. The
-        # hook's bash trap only fires while the hook shell is alive — it does
-        # NOT cover the backgrounded tuner. This is the real lock release.
+        # Always release the SessionStart hook's lock dir, even on crash.
+        # Remove pid file first (rmdir fails on non-empty dirs).
         try:
             if os.path.isdir(lock_dir):
+                pid_file = os.path.join(lock_dir, "pid")
+                if os.path.exists(pid_file):
+                    os.unlink(pid_file)
                 os.rmdir(lock_dir)
         except OSError:
             pass

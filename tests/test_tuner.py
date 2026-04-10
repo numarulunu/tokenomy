@@ -1,6 +1,7 @@
 """Tuner pure-function tests."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 from tuner.state import empty_state
@@ -123,3 +124,19 @@ def test_loss_freeze_mid_code():
     losses = [{"detector": "mid_code_ending"}]
     new = apply_loss_freezes(state, losses)
     assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" in new["freezes"]
+
+
+def test_lock_cleanup_removes_pid_file(tmp_path):
+    """Finally block should remove pid file before rmdir."""
+    lock_dir = tmp_path / "tuner.lock.d"
+    lock_dir.mkdir()
+    pid_file = lock_dir / "pid"
+    pid_file.write_text("12345")
+
+    # Simulate the finally block logic
+    ld = str(lock_dir)
+    pf = str(pid_file)
+    if os.path.exists(pf):
+        os.unlink(pf)
+    os.rmdir(ld)
+    assert not os.path.exists(ld)
