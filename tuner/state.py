@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "0.3.1"
+SCHEMA_VERSION = "0.4.0"
 
 
 def empty_state() -> Dict[str, Any]:
@@ -23,6 +23,8 @@ def empty_state() -> Dict[str, Any]:
         "freezes": {},
         "user_pinned": [],
         "estimated_savings_usd_per_month": 0.0,
+        "rolling_mean_output": 0.0,
+        "rolling_mean_n": 0.0,
     }
 
 
@@ -39,9 +41,17 @@ def load_state(path: str) -> Dict[str, Any]:
         if data.get("version") != SCHEMA_VERSION:
             log.info("schema mismatch %s != %s — keeping data", data.get("version"), SCHEMA_VERSION)
             data["version"] = SCHEMA_VERSION
-        # ensure required keys
+        # Strict schema boundary: only keys defined by empty_state() survive.
+        # Previously any stray field from a newer version or manual edit was
+        # round-tripped to disk indefinitely. Log unknowns at DEBUG so ops can
+        # see what was dropped during an upgrade/downgrade cycle.
         base = empty_state()
-        base.update(data)
+        unknown = [k for k in data if k not in base]
+        if unknown:
+            log.debug("dropping unknown applied.json keys: %s", unknown)
+        for k in base:
+            if k in data:
+                base[k] = data[k]
         return base
     except (OSError, json.JSONDecodeError) as e:
         log.warning("corrupt applied.json (%s) — resetting", e)

@@ -1,4 +1,4 @@
-"""tokenomy v0.3.1 auto-tuner main entrypoint.
+"""tokenomy v0.4.0 auto-tuner main entrypoint.
 
 Pure functions:
 - compute_caps_per_setting(corpus_stats) -> proposed caps
@@ -20,7 +20,7 @@ from analyzer.extractors import Event, iter_corpus
 from tuner.losses import detect_all, detect_user_pinned
 from tuner.settings_writer import FLOORS, merge_into_user_settings
 from tuner.state import empty_state, load_state, save_state
-from tuner.weighting import age_days, compute_cap, confidence, session_weight
+from tuner.weighting import age_days, compute_cap, confidence, session_weight, weighted_percentile
 
 log = logging.getLogger("tuner")
 
@@ -140,7 +140,6 @@ def compute_caps_per_setting(stats: Dict[str, Any]) -> Dict[str, Any]:
     # not worst-case. Plus 10% headroom. Context samples use a shorter half-life
     # (7d) via pre-reweighting upstream; here we just take p75.
     if stats["ctx_pcts"]:
-        from tuner.weighting import weighted_percentile
         p = weighted_percentile(stats["ctx_pcts"], 0.75)
         caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = max(int(p + 10), FLOORS["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
     else:
@@ -396,6 +395,29 @@ def main(argv: List[str] | None = None) -> int:
             final = {}
         else:
             final, state = apply_hysteresis_cooldown_freeze(state, proposed)
+        # Control loop: track rolling mean output tokens
+        if stats["out_tokens"]:
+            current_median = weighted_percentile(stats["out_tokens"], 0.50)
+            old_mean = state.get("rolling_mean_output", 0.0)
+            old_n = state.get("rolling_mean_n", 0.0)
+            alpha = 0.3  # EMA smoothing factor
+            if old_n > 0:
+                state["rolling_mean_output"] = old_mean * (1 - alpha) + current_median * alpha
+            else:
+                state["rolling_mean_output"] = current_median
+            state["rolling_mean_n"] = old_n + stats["effective_n"]
+
+        # Force-loosen: if current cap < 0.9 * rolling mean, zero cooldown
+        rolling = state.get("rolling_mean_output", 0.0)
+        if rolling > 0:
+            cap_key = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+            old_cap = int((state.get("caps") or {}).get(cap_key, 0))
+            if old_cap > 0 and old_cap < 0.9 * rolling:
+                cd = state.get("cooldowns", {}).get(cap_key)
+                if cd:
+                    cd["sessions_remaining"] = 0
+                    log.info("force-loosen: %s cap %d < 0.9 * rolling mean %.0f", cap_key, old_cap, rolling)
+
         state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
 
         if args.dry_run:

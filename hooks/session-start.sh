@@ -2,7 +2,7 @@
 # tokenomy SessionStart hook — spawn tuner in background if stale. Fail-open, <50ms.
 # Keep TOKENOMY_VERSION in sync with .claude-plugin/plugin.json — test_version_sync guards this.
 set +e
-TOKENOMY_VERSION="0.3.1"
+TOKENOMY_VERSION="0.4.0"
 HOME_DIR="${TOKENOMY_HOME:-$HOME/.claude/tokenomy}"
 APPLIED="$HOME_DIR/applied.json"
 LOG="$HOME_DIR/tuner.log"

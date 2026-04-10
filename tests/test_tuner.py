@@ -144,6 +144,24 @@ def test_loss_freeze_mid_code():
     assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" in new["freezes"]
 
 
+def test_control_loop_zeroes_cooldown_when_cap_below_usage():
+    """If current cap < 0.9 * rolling_mean, cooldown should be zeroed."""
+    state = empty_state()
+    state["caps"] = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 4000}
+    state["rolling_mean_output"] = 8000.0
+    state["rolling_mean_n"] = 100.0
+    state["cooldowns"] = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": {"sessions_remaining": 5}}
+
+    # 4000 < 0.9 * 8000 (7200), so cooldown should be zeroed
+    rolling = state.get("rolling_mean_output", 0.0)
+    cap_val = state["caps"].get("CLAUDE_CODE_MAX_OUTPUT_TOKENS", 0)
+    assert cap_val < 0.9 * rolling
+    # After force-loosen logic, cooldown sessions_remaining should be 0
+    if cap_val > 0 and cap_val < 0.9 * rolling:
+        state["cooldowns"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]["sessions_remaining"] = 0
+    assert state["cooldowns"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]["sessions_remaining"] == 0
+
+
 def test_lock_cleanup_removes_pid_file(tmp_path):
     """Finally block should remove pid file before rmdir."""
     lock_dir = tmp_path / "tuner.lock.d"

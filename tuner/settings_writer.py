@@ -115,7 +115,7 @@ def merge_into_user_settings(
     user_pinned: Optional[Iterable[str]] = None,
     per_server_supported: bool = False,
     baseline: Optional[Dict[str, str]] = None,
-    version: str = "0.3.1",
+    version: str = "0.4.0",
 ) -> Dict[str, str]:
     """Atomically merge tokenomy-managed env keys into the user's settings.json.
 
