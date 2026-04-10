@@ -373,6 +373,20 @@ def main(argv: List[str] | None = None) -> int:
 
     state = load_state(applied_path)
 
+    if args.first_run:
+        from tuner.consent import write_consent_summary
+        from tuner.settings_writer import BASELINE_ENV
+        summary_path = write_consent_summary(home, BASELINE_ENV)
+        merge_into_user_settings(
+            args.user_settings,
+            caps={},
+            baseline=BASELINE_ENV,
+        )
+        state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(applied_path, state)
+        log.info("first-run: wrote baseline + consent summary to %s", summary_path)
+        return 0
+
     if args.status:
         print(f"version: {state.get('version')}")
         print(f"last_tune_at: {state.get('last_tune_at')}")

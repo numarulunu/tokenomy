@@ -44,6 +44,10 @@ fi
 # exits — before the backgrounded tuner has acquired its guard — opening a
 # race window where a second session-start spawns a second tuner.
 
+if [ "$FLAG" = "--first-run" ]; then
+  echo "[tokenomy] First run. Review $HOME_DIR/consent-summary.txt for details."
+fi
+
 TOKENOMY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Detach unconditionally; redirect handled by the outer subshell so the
 # spawned python inherits already-redirected handles regardless of platform.

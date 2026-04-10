@@ -1,6 +1,7 @@
 """Tuner pure-function tests."""
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -197,3 +198,27 @@ def test_lock_cleanup_removes_pid_file(tmp_path):
         os.unlink(pf)
     os.rmdir(ld)
     assert not os.path.exists(ld)
+
+
+def test_first_run_writes_consent_summary(tmp_path):
+    """--first-run writes consent summary and baseline-only settings."""
+    from tuner import tuner
+
+    settings_path = str(tmp_path / "settings.json")
+    home = str(tmp_path / "tokenomy")
+
+    result = tuner.main([
+        "--first-run",
+        "--home", home,
+        "--user-settings", settings_path,
+    ])
+    assert result == 0
+    # Consent summary should exist
+    summary = os.path.join(home, "consent-summary.txt")
+    assert os.path.exists(summary)
+    content = open(summary, encoding="utf-8").read()
+    assert "ENABLE_TOOL_SEARCH" in content
+    # Settings should have baseline env
+    assert os.path.exists(settings_path)
+    data = json.loads(open(settings_path, encoding="utf-8").read())
+    assert data.get("env", {}).get("ENABLE_TOOL_SEARCH") == "true"
