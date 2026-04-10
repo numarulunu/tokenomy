@@ -39,6 +39,8 @@ DEFAULT_USER_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
 DEFAULT_MCP_ALLOW = {"context7", "kontext", "sequential-thinking", "serena", "plugin_context7_context7"}
 
+MIN_EFFECTIVE_N = 200
+
 
 def _server_matches(server: str, allow: set[str]) -> bool:
     if not allow:
@@ -383,9 +385,17 @@ def main(argv: List[str] | None = None) -> int:
         # cooldown expires on schedule instead of persisting forever.
         state = tick_cooldowns(state)
 
-        final, state = apply_hysteresis_cooldown_freeze(state, proposed)
         state["effective_n"] = stats["effective_n"]
         state["confidence"] = confidence(stats["effective_n"])
+
+        if stats["effective_n"] < MIN_EFFECTIVE_N:
+            log.info(
+                "confidence too low (effective_n=%.1f < %d) — writing baseline only",
+                stats["effective_n"], MIN_EFFECTIVE_N,
+            )
+            final = {}
+        else:
+            final, state = apply_hysteresis_cooldown_freeze(state, proposed)
         state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
 
         if args.dry_run:

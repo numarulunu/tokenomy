@@ -48,6 +48,24 @@ def test_compute_caps_with_data():
     assert caps["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == 25  # ~15+10=25
 
 
+def test_confidence_gate_blocks_low_n():
+    """effective_n=50 should trigger the confidence gate."""
+    from tuner.tuner import MIN_EFFECTIVE_N
+    from tuner.weighting import confidence
+
+    stats = _stats(out=[(5000.0, 1.0)] * 50)  # effective_n=50
+    assert stats["effective_n"] < MIN_EFFECTIVE_N
+    assert stats["effective_n"] == 50.0
+
+    # Proposed caps would be non-empty
+    proposed = compute_caps_per_setting(stats)
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" in proposed
+
+    # But confidence is low
+    conf = confidence(stats["effective_n"])
+    assert conf < 0.05  # 50/5000 = 0.01
+
+
 # hysteresis
 def test_hysteresis_init_applies():
     state = empty_state()
