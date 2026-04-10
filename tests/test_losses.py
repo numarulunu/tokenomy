@@ -109,6 +109,18 @@ def test_error_after_cap_ignores_pure_truncation_without_error():
     assert detect_error_after_cap(evs, capped_tools={"mcp__serena__find_symbol"}) == []
 
 
+def test_error_after_cap_matches_by_server_name():
+    """capped_tools can contain server names (not full mcp__ tool names)."""
+    evs = [
+        _tool_use("mcp__serena__find_symbol", "t1"),
+        _tool_result(size=100, is_error=True, tid="t1"),
+    ]
+    out = detect_error_after_cap(evs, capped_tools={"serena"})
+    assert len(out) == 1
+    assert out[0]["server"] == "serena"
+    assert out[0]["detector"] == "error_after_cap"
+
+
 # Regression: is_error alone must NOT be treated as truncation
 def test_truncation_requery_ignores_benign_is_error():
     evs = [

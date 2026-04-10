@@ -126,7 +126,7 @@ def detect_error_after_cap(events: List[Event], capped_tools: Iterable[str] = ()
         if e.kind != "tool_result" or not e.is_error:
             continue
         tname = name_by_id.get(e.tool_use_id or "", "")
-        if tname in capped:
+        if tname in capped or _server_of(tname) in capped:
             out.append({
                 "ts": e.ts,
                 "detector": "error_after_cap",
