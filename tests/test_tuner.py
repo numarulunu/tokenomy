@@ -12,14 +12,21 @@ from tuner.tuner import (
 )
 
 
-def _stats(out=None, mcp=None, ctx=None):
+def _stats(out=None, mcp=None, ctx=None, losses=None):
     return {
         "out_tokens": out or [],
         "mcp_sizes": mcp or {},
         "ctx_pcts": ctx or [],
-        "events": [],
+        "losses": losses or [],
         "effective_n": sum(w for _, w in (out or [])),
     }
+
+
+def test_stats_has_losses_key_not_events():
+    """After per-session loss detection, stats returns 'losses' not 'events'."""
+    s = _stats()
+    assert "losses" in s
+    assert "events" not in s
 
 
 # compute_caps

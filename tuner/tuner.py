@@ -1,4 +1,4 @@
-"""tokenomy v0.3.0 auto-tuner main entrypoint.
+"""tokenomy v0.3.1 auto-tuner main entrypoint.
 
 Pure functions:
 - compute_caps_per_setting(corpus_stats) -> proposed caps
@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 from analyzer.extractors import Event, iter_corpus
 from tuner.losses import detect_all, detect_user_pinned
@@ -54,6 +54,7 @@ def collect_samples(
     corpus_root: str,
     now: datetime | None = None,
     mcp_allow: set[str] | None = None,
+    capped_tools: Iterable[str] = (),
 ) -> Dict[str, Any]:
     """Walk corpus, return weighted samples per setting + per-MCP-server."""
     if now is None:
@@ -61,7 +62,7 @@ def collect_samples(
     out_tokens: List[Tuple[float, float]] = []
     mcp_sizes: Dict[str, List[Tuple[float, float]]] = {}
     ctx_pcts: List[Tuple[float, float]] = []
-    all_events_for_losses: List[Event] = []
+    all_losses: List[Dict[str, Any]] = []
 
     name_by_id: Dict[str, str] = {}
     session_max_ctx: Dict[str, int] = {}
@@ -105,16 +106,16 @@ def collect_samples(
             ctx_w = max(ctx_w, 0.01)
             pct = min(100.0, (max_ctx / 200_000.0) * 100.0)
             ctx_pcts.append((pct, ctx_w))
-        # keep events for loss detection (memory bounded — only first ~1000 sessions)
-        if len(all_events_for_losses) < 200_000:
-            all_events_for_losses.extend(ev_list)
+        # Run loss detectors per-session to avoid cross-session false positives
+        session_losses = detect_all(ev_list, capped_tools=capped_tools)
+        all_losses.extend(session_losses)
 
     eff_n = sum(w for _, w in out_tokens) if out_tokens else 0.0
     return {
         "out_tokens": out_tokens,
         "mcp_sizes": mcp_sizes,
         "ctx_pcts": ctx_pcts,
-        "events": all_events_for_losses,
+        "losses": all_losses,
         "effective_n": eff_n,
     }
 
@@ -259,8 +260,34 @@ def apply_loss_freezes(
             freezes["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = {"until": until, "reason": det}
         elif det == "compact_after_big_result":
             freezes["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = {"until": until, "reason": det}
-    state["freezes"] = freezes
-    return state
+    # Return a new dict instead of mutating the caller's state — matches
+    # apply_hysteresis_cooldown_freeze and prevents hidden side-effects in
+    # tests that pass the same state through multiple reducers.
+    new_state = dict(state)
+    new_state["freezes"] = freezes
+    return new_state
+
+
+def tick_cooldowns(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Decrement every cooldown's sessions_remaining by 1; drop entries at 0.
+
+    Without this, a setting that hits the tighten/loosen threshold once is
+    frozen in cooldown forever — sessions_remaining was being set but never
+    decremented, turning a '5-session cooldown' into an effective permanent
+    freeze. Must run before apply_hysteresis_cooldown_freeze each session.
+    """
+    cd = dict(state.get("cooldowns", {}) or {})
+    next_cd: Dict[str, Any] = {}
+    for key, entry in cd.items():
+        if not isinstance(entry, dict):
+            continue
+        remaining = int(entry.get("sessions_remaining", 0)) - 1
+        if remaining > 0:
+            next_cd[key] = {**entry, "sessions_remaining": remaining}
+        # else: entry expires, drop it
+    new_state = dict(state)
+    new_state["cooldowns"] = next_cd
+    return new_state
 
 
 # ─────────────────── main ───────────────────
@@ -343,13 +370,18 @@ def main(argv: List[str] | None = None) -> int:
         log.info("scanning corpus at %s", args.corpus_root)
         if not os.path.exists(args.corpus_root):
             log.warning("corpus root missing — writing baseline-only settings")
-            stats = {"out_tokens": [], "mcp_sizes": {}, "ctx_pcts": [], "events": [], "effective_n": 0.0}
+            stats = {"out_tokens": [], "mcp_sizes": {}, "ctx_pcts": [], "losses": [], "effective_n": 0.0}
         else:
-            stats = collect_samples(args.corpus_root, mcp_allow=DEFAULT_MCP_ALLOW)
+            _mcp_caps = state.get("caps", {}).get("MAX_MCP_OUTPUT_TOKENS", {})
+            _capped_servers = set(_mcp_caps.keys()) if isinstance(_mcp_caps, dict) else set()
+            stats = collect_samples(args.corpus_root, mcp_allow=DEFAULT_MCP_ALLOW, capped_tools=_capped_servers)
 
         proposed = compute_caps_per_setting(stats)
-        losses = detect_all(stats["events"], capped_tools=())
+        losses = stats["losses"]
         state = apply_loss_freezes(state, losses)
+        # Tick cooldowns BEFORE the hysteresis pass reads them, so yesterday's
+        # cooldown expires on schedule instead of persisting forever.
+        state = tick_cooldowns(state)
 
         final, state = apply_hysteresis_cooldown_freeze(state, proposed)
         state["effective_n"] = stats["effective_n"]
