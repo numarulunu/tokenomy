@@ -5,11 +5,44 @@ import json
 import logging
 import os
 import tempfile
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List, Tuple
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "0.6.0"
+
+# Ordered migration chain. Each entry transforms `data` from `from_v` to `to_v`;
+# mutate in place, dispatcher stamps the version. Walk is ordered so a multi-hop
+# upgrade (e.g. 0.5 → 0.6 → 0.7) resolves automatically. Empty today because
+# v0.6.0 → v0.7.0 added no schema fields; kept so the next schema break has a
+# ready home and doesn't need to introduce the infrastructure simultaneously.
+_MIGRATIONS: List[Tuple[str, str, Callable[[Dict[str, Any]], None]]] = []
+
+
+def _migrate(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Walk the migration chain from data's version to SCHEMA_VERSION.
+    Unknown/unreachable versions log WARNING and get stamped to current —
+    fail-open so a stale applied.json never blocks the tuner."""
+    current = data.get("version") or "0.0.0"
+    if current == SCHEMA_VERSION:
+        return data
+    # Walk forward; allow multi-hop by re-scanning after each applied step.
+    changed = True
+    while changed and current != SCHEMA_VERSION:
+        changed = False
+        for from_v, to_v, fn in _MIGRATIONS:
+            if current == from_v:
+                log.info("migrating applied.json %s -> %s", from_v, to_v)
+                fn(data)
+                data["version"] = to_v
+                current = to_v
+                changed = True
+                break
+    if current != SCHEMA_VERSION:
+        log.warning("no migration path from %r to %s — keeping data, stamping version",
+                    data.get("version"), SCHEMA_VERSION)
+        data["version"] = SCHEMA_VERSION
+    return data
 
 
 def empty_state() -> Dict[str, Any]:
@@ -23,6 +56,7 @@ def empty_state() -> Dict[str, Any]:
         "freezes": {},
         "user_pinned": [],
         "estimated_savings_usd_per_month": 0.0,
+        "caps_savings": {},
         "rolling_mean_output": 0.0,
         "rolling_mean_seeded": False,
     }
@@ -37,10 +71,7 @@ def load_state(path: str) -> Dict[str, Any]:
         if not isinstance(data, dict):
             log.warning("applied.json not a dict — resetting")
             return empty_state()
-        # schema migration stub
-        if data.get("version") != SCHEMA_VERSION:
-            log.info("schema mismatch %s != %s — keeping data", data.get("version"), SCHEMA_VERSION)
-            data["version"] = SCHEMA_VERSION
+        data = _migrate(data)
         # Strict schema boundary: only keys defined by empty_state() survive.
         # Previously any stray field from a newer version or manual edit was
         # round-tripped to disk indefinitely. Log unknowns at DEBUG so ops can

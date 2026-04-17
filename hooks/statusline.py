@@ -154,6 +154,23 @@ MODEL_DISPLAY = {
 _MODEL_RE = re.compile(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?")
 
 
+def model_family(model_id: str) -> str:
+    """Return 'opus' | 'sonnet' | 'haiku' | '' from a model ID.
+    Used for per-family burn-rate threshold scaling — Opus burns ~10x Haiku
+    per token, so a single USD/hr band can't serve all three families."""
+    if not model_id:
+        return ""
+    m = _MODEL_RE.search(model_id.lower())
+    if m:
+        return m.group(1)
+    # Legacy table-style IDs (e.g. claude-3-5-haiku).
+    low = model_id.lower()
+    for fam in ("opus", "sonnet", "haiku"):
+        if fam in low:
+            return fam
+    return ""
+
+
 # ---------- pricing ----------
 
 def load_pricing() -> dict:
@@ -610,24 +627,48 @@ def _color_cache(ratio: float) -> str:
     return _RED
 
 
-# Burn-rate bands calibrated to sustained Opus 4.7 work with healthy caching.
-# Override with TOKENOMY_BURN_YELLOW / TOKENOMY_BURN_RED env vars (USD/hr) if
-# these don't match your budget — e.g. Haiku-only work needs tighter bands,
-# deep-research sessions with lots of output tokens may want looser ones.
-def _burn_thresholds() -> tuple[float, float]:
-    def _f(name: str, default: float) -> float:
-        try:
-            return float(os.environ.get(name, "") or default)
-        except ValueError:
-            return default
-    return _f("TOKENOMY_BURN_YELLOW", 10.0), _f("TOKENOMY_BURN_RED", 25.0)
+# Burn-rate bands. Defaults are calibrated to sustained Opus 4.7 work with
+# healthy caching; lighter families scale down proportionally since their
+# per-token cost is 3-10x lower. Resolution order per render:
+#   1. TOKENOMY_BURN_YELLOW_{FAMILY}  — family-specific override (absolute USD/hr)
+#   2. TOKENOMY_BURN_YELLOW           — generic override (absolute USD/hr)
+#   3. scaled default                 — Opus base × family scale factor
+# Same pattern for _RED. Family-unknown IDs use the Opus base (conservative:
+# better to under-warn a cheap model than miss a spike on an expensive one).
+_BURN_BASE_YELLOW = 10.0
+_BURN_BASE_RED = 25.0
+_BURN_FAMILY_SCALE = {"opus": 1.0, "sonnet": 0.5, "haiku": 0.25}
 
 
-def _color_burn(usd_per_hour: float) -> str:
+def _env_float(name: str, default: float | None) -> float | None:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _burn_thresholds(family: str = "") -> tuple[float, float]:
+    scale = _BURN_FAMILY_SCALE.get(family, 1.0)
+    default_y = _BURN_BASE_YELLOW * scale
+    default_r = _BURN_BASE_RED * scale
+    suffix = f"_{family.upper()}" if family else ""
+    y = _env_float(f"TOKENOMY_BURN_YELLOW{suffix}", None) if suffix else None
+    if y is None:
+        y = _env_float("TOKENOMY_BURN_YELLOW", default_y) or default_y
+    r = _env_float(f"TOKENOMY_BURN_RED{suffix}", None) if suffix else None
+    if r is None:
+        r = _env_float("TOKENOMY_BURN_RED", default_r) or default_r
+    return y, r
+
+
+def _color_burn(usd_per_hour: float, family: str = "") -> str:
     """Green < yellow threshold (steady work) • yellow within band (heavy
     session, watch it) • red ≥ red threshold (budget spike — check cache
     ratio + whether you're forcing long output)."""
-    y, r = _burn_thresholds()
+    y, r = _burn_thresholds(family)
     if usd_per_hour >= r:
         return _RED
     if usd_per_hour >= y:
@@ -865,7 +906,7 @@ def render(payload: dict, pricing: dict) -> str:
         burn_section = f"{burn_color}{int(round(sess_burn))}%/hr{_RESET}"
     else:
         burn_usd = float(rate or 0)
-        burn_color = _color_burn(burn_usd) if burn_usd > 0 else ""
+        burn_color = _color_burn(burn_usd, model_family(model_id)) if burn_usd > 0 else ""
         burn_section = f"{burn_color}{fmt_money(rate)}/hr{_RESET if burn_color else ''}"
 
     return (

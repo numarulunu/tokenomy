@@ -10,16 +10,18 @@ I/O wrappers:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 from analyzer.extractors import Event, iter_corpus
 from tuner import auto_rules
 from tuner.losses import detect_all, detect_user_pinned
 from tuner.settings_writer import FLOORS, merge_into_user_settings
+from tuner.savings import attribute_caps_savings
 from tuner.state import empty_state, load_state, save_state
 from tuner.weighting import age_days, compute_cap, confidence, session_weight, weighted_percentile
 
@@ -41,6 +43,38 @@ DEFAULT_USER_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 DEFAULT_MCP_ALLOW = {"context7", "kontext", "sequential-thinking", "serena", "plugin_context7_context7"}
 
 MIN_EFFECTIVE_N = 200
+
+
+def _read_mcp_servers(path: str) -> Set[str]:
+    """Read top-level `mcpServers` dict keys from a Claude Code config file.
+    Returns empty set on any error. File absence is not an error."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(d, dict):
+        return set()
+    servers = d.get("mcpServers")
+    if not isinstance(servers, dict):
+        return set()
+    return {k for k in servers.keys() if isinstance(k, str)}
+
+
+def configured_mcp_servers() -> Set[str]:
+    """Actual user-scoped MCP servers from `~/.claude.json`.
+
+    Falls back to DEFAULT_MCP_ALLOW if the file is absent/unreadable or has
+    no mcpServers entries — prevents regressions on fresh installs. The
+    tuner aggregates sessions across all projects, so project-scoped
+    `.mcp.json` is intentionally not read here (that would require
+    per-session active-server tracking — deferred to a future version).
+    Plugin-provided MCPs are handled by the fuzzy matcher in
+    _server_matches; they don't live in mcpServers."""
+    servers = _read_mcp_servers(os.path.expanduser("~/.claude.json"))
+    if not servers:
+        return set(DEFAULT_MCP_ALLOW)
+    return servers
 
 
 def _server_matches(server: str, allow: set[str]) -> bool:
@@ -487,6 +521,11 @@ def main(argv: List[str] | None = None) -> int:
                         log.info("force-loosen: %s cap %d < 0.9 * rolling mean %.0f", cap_key, old_cap, rolling)
 
         state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
+        # Attribute counterfactual savings to each final cap so the MCP tool
+        # and any downstream consumer can answer "which cap saved what?".
+        # Over-corpus figure, not monthly — presentation concern belongs to
+        # the consumer (see tokenomy_mcp.server.caps_savings).
+        state["caps_savings"] = attribute_caps_savings(final, stats)
 
         # Auto-rules: idle-gap analysis, unused MCP, big-file reads.
         # Runs on last 14d of corpus; produces env overlays (auto-applied) and
@@ -499,7 +538,7 @@ def main(argv: List[str] | None = None) -> int:
                 auto_results = auto_rules.run(
                     recent,
                     current_env=current_env,
-                    active_servers=DEFAULT_MCP_ALLOW,
+                    active_servers=configured_mcp_servers(),
                 )
                 sugg_path = os.path.join(home, "_suggestions.md")
                 with open(sugg_path, "w", encoding="utf-8") as f:

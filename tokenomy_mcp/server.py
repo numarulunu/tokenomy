@@ -50,6 +50,7 @@ if str(ROOT) not in sys.path:
 
 TOKENOMY_HOME = Path(os.path.expanduser("~/.claude/tokenomy"))
 INSIGHTS_PATH = TOKENOMY_HOME / "insights.json"
+APPLIED_PATH = TOKENOMY_HOME / "applied.json"
 SUGGESTIONS_PATH = TOKENOMY_HOME / "_suggestions.md"
 SUGGESTIONS_MAX_BYTES = 64_000
 LOG_PATH = TOKENOMY_HOME / "_mcp.log"
@@ -240,6 +241,34 @@ def auto_rule_decisions() -> Dict[str, Any]:
     }
 
 
+def caps_savings() -> Dict[str, Any]:
+    """Per-cap USD savings attributed on the last tuner run.
+
+    Reads applied.json produced by the tuner. Values are the raw corpus
+    attribution over whatever sample window the tuner used (typically ~14d
+    with a recency-weighted decay). Settings with zero attributable savings
+    are omitted, so an empty `savings` map means the current caps aren't
+    binding on recent activity.
+    """
+    try:
+        with APPLIED_PATH.open("r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"path": str(APPLIED_PATH), "savings": {}, "error": "not found"}
+    if not isinstance(state, dict):
+        return {"path": str(APPLIED_PATH), "savings": {}, "error": "malformed"}
+    savings = state.get("caps_savings") or {}
+    if not isinstance(savings, dict):
+        savings = {}
+    total = round(sum(v for v in savings.values() if isinstance(v, (int, float))), 2)
+    return {
+        "path": str(APPLIED_PATH),
+        "last_tune_at": state.get("last_tune_at"),
+        "savings": savings,
+        "total_usd": total,
+    }
+
+
 # ──────────────────────── tool registry ────────────────────────
 
 TOOLS: Dict[str, Dict[str, Any]] = {
@@ -278,6 +307,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "description": "Raw text of ~/.claude/tokenomy/_suggestions.md.",
         "inputSchema": {"type": "object", "properties": {}},
         "handler": suggestions_md,
+    },
+    "caps_savings": {
+        "description": "USD savings attributed to each active cap from the last tuner run.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": caps_savings,
     },
 }
 

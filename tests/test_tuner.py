@@ -8,9 +8,12 @@ from datetime import datetime, timedelta, timezone
 from tuner.state import empty_state
 from tuner.tuner import (
     COOLDOWN_SESSIONS,
+    DEFAULT_MCP_ALLOW,
+    _read_mcp_servers,
     apply_hysteresis_cooldown_freeze,
     apply_loss_freezes,
     compute_caps_per_setting,
+    configured_mcp_servers,
 )
 
 
@@ -222,3 +225,49 @@ def test_first_run_writes_consent_summary(tmp_path):
     assert os.path.exists(settings_path)
     data = json.loads(open(settings_path, encoding="utf-8").read())
     assert data.get("env", {}).get("ENABLE_TOOL_SEARCH") == "true"
+
+
+# ─────────────── configured_mcp_servers ───────────────
+
+
+def test_read_mcp_servers_missing_file(tmp_path):
+    assert _read_mcp_servers(str(tmp_path / "nope.json")) == set()
+
+
+def test_read_mcp_servers_malformed(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text("not json {", encoding="utf-8")
+    assert _read_mcp_servers(str(p)) == set()
+
+
+def test_read_mcp_servers_no_mcpservers_key(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text(json.dumps({"other": 1}), encoding="utf-8")
+    assert _read_mcp_servers(str(p)) == set()
+
+
+def test_read_mcp_servers_returns_keys(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text(
+        json.dumps({"mcpServers": {"serena": {}, "kontext": {}, "playwright": {}}}),
+        encoding="utf-8",
+    )
+    assert _read_mcp_servers(str(p)) == {"serena", "kontext", "playwright"}
+
+
+def test_configured_mcp_servers_reads_user_config(tmp_path, monkeypatch):
+    fake_home = tmp_path
+    (fake_home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"playwright": {}, "notion": {}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    assert configured_mcp_servers() == {"playwright", "notion"}
+
+
+def test_configured_mcp_servers_falls_back_when_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    # no ~/.claude.json — should return DEFAULT_MCP_ALLOW
+    assert configured_mcp_servers() == set(DEFAULT_MCP_ALLOW)
