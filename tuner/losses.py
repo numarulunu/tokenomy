@@ -107,12 +107,22 @@ def detect_compact_after_big_result(events: List[Event], big_threshold: int = 30
     return out
 
 
+SMALL_ERROR_BYTES = 500  # ENOENT/timeout/connection errors are tiny payloads.
+
+
 def detect_error_after_cap(events: List[Event], capped_tools: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """Error tool_result for any currently-capped tool.
 
     Gated on `is_error` (the raw tool_result flag), not `truncated` — the
     signal we want here is "our cap broke this tool", and tools report that
     via is_error, not via a truncation marker.
+
+    Narrowing: bare `is_error` matches ENOENT/timeout/connection-drop noise
+    (see detect_truncation_requery docstring: ~99.5% benign). Require either a
+    real truncation marker OR response_size_bytes >= SMALL_ERROR_BYTES —
+    genuine cap-caused errors carry the partial payload that got cut, so
+    they're always large-ish. Scopes this detector to cap-related errors and
+    prevents spurious cap-raise signals from unrelated tool failures.
     """
     capped = set(capped_tools)
     if not capped:
@@ -124,6 +134,8 @@ def detect_error_after_cap(events: List[Event], capped_tools: Iterable[str] = ()
             name_by_id[e.tool_use_id] = e.tool_name or ""
     for e in events:
         if e.kind != "tool_result" or not e.is_error:
+            continue
+        if not (e.truncated or e.response_size_bytes >= SMALL_ERROR_BYTES):
             continue
         tname = name_by_id.get(e.tool_use_id or "", "")
         if tname in capped or _server_of(tname) in capped:

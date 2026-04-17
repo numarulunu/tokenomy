@@ -335,6 +335,11 @@ def _print_diff(old_caps: Dict[str, Any], new_caps: Dict[str, Any]) -> None:
 
 
 def main(argv: List[str] | None = None) -> int:
+    # Global killswitch: TOKENOMY_OFF=1 disables the entire plugin (no analysis,
+    # no state writes, no settings merge). Lets users debug "was it Tokenomy?"
+    # without uninstalling. Returns 0 so hook callers don't log failure.
+    if os.environ.get("TOKENOMY_OFF"):
+        return 0
     ap = argparse.ArgumentParser(prog="tuner")
     ap.add_argument("--first-run", action="store_true")
     ap.add_argument("--dry-run", action="store_true")

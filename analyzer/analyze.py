@@ -504,6 +504,9 @@ def _looks_like_log_path_hist(session_id: str, keys: Dict[tuple, int]) -> bool:
 # Entrypoint
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
+    # Global killswitch — see tuner/tuner.py:main() for rationale.
+    if os.environ.get("TOKENOMY_OFF"):
+        return 0
     ap = argparse.ArgumentParser(prog="tokenomy-analyze")
     ap.add_argument("--days", type=int, default=30, help="scan this many days back (default 30)")
     ap.add_argument("--project", help="limit to a single project directory (name under ~/.claude/projects)")
@@ -522,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+    pricing.warn_if_stale()
 
     table = pricing.PRICING
     if args.pricing_file:
@@ -561,9 +566,13 @@ def main(argv: list[str] | None = None) -> int:
     insights["events_processed"] = events
     insights["fetch_events_processed"] = fetch_events
 
+    # Atomic write: statusline + MCP read insights.json live. A half-written
+    # file crashes those readers, so swap via tmp+rename to eliminate the window.
     os.makedirs(os.path.dirname(args.json_out), exist_ok=True)
-    with open(args.json_out, "w", encoding="utf-8") as f:
+    tmp_out = args.json_out + ".tmp"
+    with open(tmp_out, "w", encoding="utf-8") as f:
         json.dump(insights, f, indent=2, ensure_ascii=False, default=str)
+    os.replace(tmp_out, args.json_out)
 
     if not args.no_report:
         try:

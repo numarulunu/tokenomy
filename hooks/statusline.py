@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +53,47 @@ except (AttributeError, OSError):
 HERE = Path(__file__).resolve().parent
 PRICING_PATH = HERE / "pricing.json"
 BLOCK_HOURS = 5
+
+# Render-error indicator: statusline runs as a per-invocation subprocess, so
+# in-memory state cannot survive between renders. Persist failure timestamps
+# to a small JSON file and show a `⚠F<n>` glyph only when the failure rate
+# crosses the alert-fatigue threshold (≥3 within 5 min). One transient crash
+# stays silent; sustained breakage is visible.
+_RENDER_ERROR_LOG = Path.home() / ".claude" / "tokenomy" / "render_errors.json"
+_ERROR_WINDOW_SEC = 300
+_ERROR_THRESHOLD = 3
+_ERROR_LOG_MAX = 10
+
+
+def _record_render_error() -> None:
+    try:
+        _RENDER_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            prev = json.loads(_RENDER_ERROR_LOG.read_text(encoding="utf-8"))
+            if not isinstance(prev, list):
+                prev = []
+        except (OSError, json.JSONDecodeError):
+            prev = []
+        prev = [t for t in prev if isinstance(t, (int, float))]
+        prev.append(time.time())
+        prev = prev[-_ERROR_LOG_MAX:]
+        _RENDER_ERROR_LOG.write_text(json.dumps(prev), encoding="utf-8")
+    except OSError:
+        pass  # fail-open — the indicator is best-effort
+
+
+def _render_error_indicator() -> str:
+    try:
+        entries = json.loads(_RENDER_ERROR_LOG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(entries, list):
+        return ""
+    now = time.time()
+    recent = [t for t in entries if isinstance(t, (int, float)) and now - t < _ERROR_WINDOW_SEC]
+    if len(recent) >= _ERROR_THRESHOLD:
+        return f" \u26A0F{len(recent)}"
+    return ""
 
 
 def _resolve_claude_dirs() -> list[Path]:
@@ -833,15 +875,21 @@ def render(payload: dict, pricing: dict) -> str:
         f"\U0001F525 {burn_section} | "
         f"\U0001F9E0 {ctx_str} | "
         f"\U0001F4BE {cache_str}"
+        f"{_render_error_indicator()}"
     )
 
 
 # ---------- main ----------
 
 def main() -> int:
+    # Global killswitch: TOKENOMY_OFF=1 renders nothing so Claude Code falls back
+    # to its default statusline. Exit 0 so the hook isn't marked broken.
+    if os.environ.get("TOKENOMY_OFF"):
+        return 0
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        _record_render_error()
         sys.stdout.write("Tokenomy")
         return 0
     pricing = load_pricing()
@@ -850,7 +898,11 @@ def main() -> int:
         _CURRENCY = load_currency()
     except Exception:
         pass  # fail-open to USD
-    sys.stdout.write(render(payload, pricing))
+    try:
+        sys.stdout.write(render(payload, pricing))
+    except Exception:
+        _record_render_error()
+        sys.stdout.write("Tokenomy")
     return 0
 
 
@@ -858,5 +910,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
+        _record_render_error()
         sys.stdout.write("Tokenomy")
         sys.exit(0)

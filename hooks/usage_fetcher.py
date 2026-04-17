@@ -17,6 +17,7 @@ Opt-out: set TOKENOMY_DISABLE_USAGE_FETCH=1 to skip outbound calls.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -24,6 +25,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 HEADERS = {
@@ -73,28 +76,45 @@ def _fetch(token: str) -> dict | None:
         return None
 
 
+def _validate_usage_entry(w: Any) -> bool:
+    """Assert required shape for one usage window: `utilization` numeric and
+    `resets_at` non-empty string. Used to detect upstream schema drift so we
+    surface it in logs instead of silently zero-filling."""
+    if not isinstance(w, dict):
+        return False
+    u = w.get("utilization")
+    r = w.get("resets_at")
+    return isinstance(u, (int, float)) and isinstance(r, str) and bool(r)
+
+
 def _parse(payload: dict) -> dict:
     """Reshape Anthropic's response to the minimal fields we render.
 
     `utilization` is % USED in the upstream payload — flip to % LEFT so the
     statusline convention "high number = healthy" holds (green when plenty
     of quota remains). Also stash the raw used values so history-based burn
-    rate math doesn't have to invert pct_left → used on every read."""
+    rate math doesn't have to invert pct_left → used on every read.
+
+    Malformed windows are dropped (not zero-filled) and logged at WARNING so
+    a schema drift in the upstream endpoint is visible instead of quietly
+    producing a bogus 0%-used reading."""
     out: dict[str, Any] = {"fetched_at": int(time.time())}
     for k_in, k_pct, k_reset, k_used in (
         ("five_hour", "sess_pct_left", "sess_resets_at", "sess_pct_used"),
         ("seven_day", "week_pct_left", "week_resets_at", "week_pct_used"),
     ):
         w = payload.get(k_in)
-        if isinstance(w, dict):
-            u = w.get("utilization")
-            if isinstance(u, (int, float)):
-                used = max(0, min(100, int(round(u))))
-                out[k_pct] = 100 - used
-                out[k_used] = used
-            r = w.get("resets_at")
-            if isinstance(r, str) and r:
-                out[k_reset] = r
+        if not _validate_usage_entry(w):
+            if w is not None:
+                log.warning(
+                    "usage payload %r window has unexpected shape — dropping. raw=%r",
+                    k_in, w,
+                )
+            continue
+        used = max(0, min(100, int(round(w["utilization"]))))
+        out[k_pct] = 100 - used
+        out[k_used] = used
+        out[k_reset] = w["resets_at"]
     tier = payload.get("tier")
     if isinstance(tier, str):
         out["tier"] = tier
@@ -192,7 +212,9 @@ def refresh_if_stale(max_age: int = CACHE_TTL_SEC) -> dict | None:
     Returns stale cache on fetch failure so the statusline has a sane
     value to render. Returns None only when no cache exists and the
     fetch also fails — callers must treat this as 'fall back to heuristic'."""
-    if os.environ.get("TOKENOMY_DISABLE_USAGE_FETCH"):
+    # TOKENOMY_OFF is the global killswitch; TOKENOMY_DISABLE_USAGE_FETCH is
+    # the narrower legacy opt-out (kept for backwards compat). Either disables.
+    if os.environ.get("TOKENOMY_OFF") or os.environ.get("TOKENOMY_DISABLE_USAGE_FETCH"):
         return None
     cache = load_cache()
     if is_fresh(cache, max_age):

@@ -65,6 +65,7 @@ def get_model_pricing(model: str, table: Dict[str, Dict[str, float]] | None = No
 
 
 _warned_models: set[str] = set()
+_warned_staleness = False
 
 
 def _warn_unknown_model(model: str) -> None:
@@ -72,6 +73,22 @@ def _warn_unknown_model(model: str) -> None:
         return
     _warned_models.add(model)
     log.warning("unknown model %r — falling back to %s pricing", model, DEFAULT_PRICING_KEY)
+
+
+def warn_if_stale(threshold_months: int = 3) -> None:
+    """One-shot stderr warning when the embedded pricing table is stale.
+    Prices drift; without a fetch mechanism, the freshness marker is the
+    only signal. Fires once per process to avoid log spam."""
+    global _warned_staleness
+    if _warned_staleness:
+        return
+    age = pricing_age_months()
+    if age > threshold_months:
+        _warned_staleness = True
+        log.warning(
+            "pricing table is %d months stale (updated %s) — override with --pricing-file",
+            age, PRICING_UPDATED_AT,
+        )
 
 
 def cost_for_usage(
