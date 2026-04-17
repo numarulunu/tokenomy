@@ -22,6 +22,7 @@ Design:
 """
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,13 @@ except Exception:  # pragma: no cover - fail-open
     def load_currency() -> dict:
         return {"code": "USD", "symbol": "$", "rate_to_usd": 1.0}
 
+# Real Anthropic quota fetch. Import-guarded so a fetcher failure (missing
+# deps, unreadable credentials) degrades gracefully to the USD heuristic.
+try:
+    from hooks import usage_fetcher  # type: ignore
+except Exception:  # pragma: no cover - fail-open
+    usage_fetcher = None  # type: ignore
+
 # --- stdout utf-8 (Windows cp1252 chokes on emoji) ---
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -43,22 +51,65 @@ except (AttributeError, OSError):
 
 HERE = Path(__file__).resolve().parent
 PRICING_PATH = HERE / "pricing.json"
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
 BLOCK_HOURS = 5
+
+
+def _resolve_claude_dirs() -> list[Path]:
+    """Return all valid .claude-style root dirs to aggregate across accounts.
+
+    Priority (mirrors ccusage):
+    1. CLAUDE_CONFIG_DIR env var — comma-separated list of explicit paths.
+       If set, only these are used (no fallback to defaults).
+    2. XDG config path  (~/.config/claude on Linux/Mac, %XDG_CONFIG_HOME%/claude)
+    3. ~/.claude  (standard default)
+
+    A path is included only when its `projects/` subdirectory exists.
+    """
+    env_val = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env_val:
+        dirs = []
+        seen: set = set()
+        for raw in env_val.split(","):
+            p = Path(raw.strip()).resolve()
+            key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (p / "projects").is_dir():
+                dirs.append(p)
+        return dirs  # env wins — return even if empty (user explicitly set it)
+
+    # Defaults: XDG path + ~/.claude
+    xdg_config = os.environ.get("XDG_CONFIG_HOME", "")
+    candidates: list[Path] = []
+    if xdg_config:
+        candidates.append(Path(xdg_config) / "claude")
+    candidates.append(Path.home() / ".claude")
+
+    dirs = []
+    seen_str: set = set()
+    for p in candidates:
+        key = str(p.resolve())
+        if key in seen_str:
+            continue
+        seen_str.add(key)
+        if (p / "projects").is_dir():
+            dirs.append(p.resolve())
+    return dirs
 CTX_LIMIT_DEFAULT = 200_000
 CTX_LIMIT_1M = 1_000_000
 
+# Only legacy naming (family after version) lives in the table. Modern IDs
+# of the form `claude-{family}-{major}[-{minor}]` are derived by regex so new
+# model versions (e.g. `claude-opus-4-8`, `claude-sonnet-5`) display correctly
+# without a code change.
 MODEL_DISPLAY = {
-    "claude-opus-4-6": "Opus 4.6",
-    "claude-opus-4-5": "Opus 4.5",
-    "claude-sonnet-4-6": "Sonnet 4.6",
-    "claude-sonnet-4-5": "Sonnet 4.5",
-    "claude-haiku-4-5": "Haiku 4.5",
-    "claude-opus-4": "Opus 4",
-    "claude-sonnet-4": "Sonnet 4",
     "claude-3-5-sonnet": "Sonnet 3.5",
     "claude-3-5-haiku": "Haiku 3.5",
 }
+
+# claude-opus-4, claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5-20251001…
+_MODEL_RE = re.compile(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?")
 
 
 # ---------- pricing ----------
@@ -207,10 +258,18 @@ def _parse_file(path: Path) -> list:
 
 
 def _walk_cached() -> list:
-    """One unified pass with mtime-keyed cache. Returns deduped flat list."""
-    if not PROJECTS_DIR.is_dir():
+    """One unified pass with mtime-keyed cache. Returns deduped flat list.
+
+    Walks all account dirs returned by _resolve_claude_dirs() so that usage
+    from multiple Anthropic accounts (or custom CLAUDE_CONFIG_DIR paths) is
+    aggregated into a single cost figure.
+    """
+    claude_dirs = _resolve_claude_dirs()
+    if not claude_dirs:
         return []
-    paths = list(PROJECTS_DIR.rglob("*.jsonl"))
+    paths: list[Path] = []
+    for d in claude_dirs:
+        paths.extend((d / "projects").rglob("*.jsonl"))
     live_keys = set()
     for p in paths:
         key = str(p)
@@ -321,9 +380,10 @@ def parse_ts(s: str):
 
 
 def all_transcripts():
-    if not PROJECTS_DIR.is_dir():
-        return []
-    return list(PROJECTS_DIR.rglob("*.jsonl"))
+    paths = []
+    for d in _resolve_claude_dirs():
+        paths.extend((d / "projects").rglob("*.jsonl"))
+    return paths
 
 
 # ---------- aggregators ----------
@@ -351,6 +411,16 @@ def all_time_cost(pricing: dict, msgs: list | None = None) -> float:
     if msgs is None:
         msgs = _walk_cached()
     return sum(_msg_cost(m, pricing) for m in msgs)
+
+
+def weekly_cost(pricing: dict, msgs: list | None = None) -> float:
+    """Rolling 7-day repriced cost. Used for Anthropic Pro/Max weekly budget
+    tracking — Anthropic's weekly cap is a rolling window, so this matches
+    without needing to guess the user's reset day."""
+    if msgs is None:
+        msgs = _walk_cached()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    return sum(_msg_cost(m, pricing) for m in msgs if m[1] >= cutoff)
 
 
 def collect_recent_messages(since_hours: int, pricing: dict, msgs: list | None = None):
@@ -466,7 +536,174 @@ def last_context_tokens(transcript_path: str) -> int:
     return 0
 
 
+# ANSI colors for live health cues. Claude Code's statusLine honors standard
+# SGR escapes; keep the palette to green/yellow/red so terminals without a
+# true-color profile still render correctly. NO_COLOR disables (industry
+# convention — see https://no-color.org).
+_COLOR_ENABLED = not os.environ.get("NO_COLOR")
+_GREEN = "\033[32m" if _COLOR_ENABLED else ""
+_YELLOW = "\033[33m" if _COLOR_ENABLED else ""
+_RED = "\033[31m" if _COLOR_ENABLED else ""
+_DIM = "\033[2m" if _COLOR_ENABLED else ""
+_RESET = "\033[0m" if _COLOR_ENABLED else ""
+
+
+def _color_ctx(pct: int) -> str:
+    """Green <60 (safe /clear zone) • yellow 60-79 (preempt compact) • red ≥80
+    (attention decay imminent, compact any turn)."""
+    if pct >= 80:
+        return _RED
+    if pct >= 60:
+        return _YELLOW
+    return _GREEN
+
+
+def _color_cache(ratio: float) -> str:
+    """Green ≥80% (cache hot, costs dominated by $1.5/M reads) • yellow 50-79
+    (partial) • red <50 (cache cold, you're paying $15/M for fresh input)."""
+    if ratio >= 0.80:
+        return _GREEN
+    if ratio >= 0.50:
+        return _YELLOW
+    return _RED
+
+
+# Burn-rate bands calibrated to sustained Opus 4.7 work with healthy caching.
+# Override with TOKENOMY_BURN_YELLOW / TOKENOMY_BURN_RED env vars (USD/hr) if
+# these don't match your budget — e.g. Haiku-only work needs tighter bands,
+# deep-research sessions with lots of output tokens may want looser ones.
+def _burn_thresholds() -> tuple[float, float]:
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+    return _f("TOKENOMY_BURN_YELLOW", 10.0), _f("TOKENOMY_BURN_RED", 25.0)
+
+
+def _color_burn(usd_per_hour: float) -> str:
+    """Green < yellow threshold (steady work) • yellow within band (heavy
+    session, watch it) • red ≥ red threshold (budget spike — check cache
+    ratio + whether you're forcing long output)."""
+    y, r = _burn_thresholds()
+    if usd_per_hour >= r:
+        return _RED
+    if usd_per_hour >= y:
+        return _YELLOW
+    return _GREEN
+
+
+# Session burn bands in %/hr of the 5h window. A steady 20%/hr exactly
+# drains the window over its 5h lifetime — anything above that means the
+# cap hits before the window rolls. Override with TOKENOMY_SESS_BURN_YELLOW
+# / TOKENOMY_SESS_BURN_RED when your work pattern wants different bands.
+def _sess_burn_thresholds() -> tuple[float, float]:
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+    return _f("TOKENOMY_SESS_BURN_YELLOW", 20.0), _f("TOKENOMY_SESS_BURN_RED", 35.0)
+
+
+def _color_sess_burn(pct_per_hour: float) -> str:
+    y, r = _sess_burn_thresholds()
+    if pct_per_hour >= r:
+        return _RED
+    if pct_per_hour >= y:
+        return _YELLOW
+    return _GREEN
+
+
+# Budget ceilings for session (5h block) and rolling week. Defaults calibrated
+# to Max 20x heavy-use bands (~$300 / 5h block, ~$2500 / week reprice). These
+# are not Anthropic-published caps — Max limits are opaque fair-use throttles,
+# not USD-denominated — so treat them as burn-rate heuristics. Override with
+# TOKENOMY_SESSION_LIMIT_USD / TOKENOMY_WEEKLY_LIMIT_USD when your real usage
+# sits outside the band.
+def _budget_limits() -> tuple[float, float]:
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+    return _f("TOKENOMY_SESSION_LIMIT_USD", 300.0), _f("TOKENOMY_WEEKLY_LIMIT_USD", 2500.0)
+
+
+def _color_budget(pct_left: float) -> str:
+    """Green ≥50% remaining (plenty of room) • yellow 20-49 (throttle long
+    agent loops) • red <20 (stop non-essential calls)."""
+    if pct_left < 0.20:
+        return _RED
+    if pct_left < 0.50:
+        return _YELLOW
+    return _GREEN
+
+
+# Per-session cache ratio, parsed from the current transcript only.
+# Keyed by path with an mtime cache so re-renders are cheap.
+_SESSION_CACHE: dict = {}
+
+
+def session_cache_ratio(transcript_path: str) -> tuple[float, int, int]:
+    """Return (hit_rate, cache_read_tokens, total_input_volume) for one session.
+
+    Cache ratio = cache_read / (cache_read + cache_creation + input), matching
+    Anthropic's prompt-caching docs. cache_creation_input_tokens MUST be in the
+    denominator: those are tokens that *missed* the cache and had to be written
+    fresh — skipping them pushes a warm-session ratio to ~99% artificially.
+    Session-scoped so cross-project mixing can't smear cold vs hot prefixes.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return 0.0, 0, 0
+    try:
+        mtime = os.stat(transcript_path).st_mtime_ns
+    except OSError:
+        return 0.0, 0, 0
+    cached = _SESSION_CACHE.get(transcript_path)
+    if cached and cached[0] == mtime:
+        cache_read, total_in = cached[1], cached[2]
+    else:
+        cache_read = 0
+        cache_creation = 0
+        input_tok = 0
+        try:
+            with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    msg = rec.get("message") if isinstance(rec.get("message"), dict) else None
+                    usage = (msg or {}).get("usage") or rec.get("usage")
+                    if not usage:
+                        continue
+                    input_tok += int(usage.get("input_tokens", 0) or 0)
+                    cache_read += int(usage.get("cache_read_input_tokens", 0) or 0)
+                    cache_creation += int(usage.get("cache_creation_input_tokens", 0) or 0)
+        except OSError:
+            return 0.0, 0, 0
+        total_in = cache_read + cache_creation + input_tok
+        _SESSION_CACHE[transcript_path] = (mtime, cache_read, total_in)
+    if total_in == 0:
+        return 0.0, cache_read, total_in
+    return cache_read / total_in, cache_read, total_in
+
+
 def context_limit(model_id: str) -> int:
+    # User override wins: Tokenomy writes CLAUDE_CODE_AUTO_COMPACT_WINDOW into
+    # settings.json to raise Claude Code's compact threshold. When present, the
+    # statusbar pct% must scale to that window — otherwise `claude-opus-4-7`
+    # (no "1m" in the id) always reads against 200k even when the user has
+    # explicitly opted into a larger working window.
+    env_win = os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "").strip()
+    if env_win.isdigit():
+        n = int(env_win)
+        if n >= 100_000:
+            return n
     return CTX_LIMIT_1M if model_id and "1m" in model_id.lower() else CTX_LIMIT_DEFAULT
 
 
@@ -510,6 +747,16 @@ def model_display(model_id: str, fallback: str) -> str:
     if not model_id:
         return fallback or "Claude"
     key = model_id.lower()
+    # Regex-first: any `claude-{family}-{major}[-{minor}]` ID resolves without
+    # a table update. Future versions (4-8, 5-0, etc.) display correctly on
+    # day one. The dated suffix on production IDs is ignored by .search().
+    m = _MODEL_RE.search(key)
+    if m:
+        family = m.group(1).capitalize()
+        major, minor = m.group(2), m.group(3)
+        return f"{family} {major}.{minor}" if minor else f"{family} {major}"
+    # Table fallback for legacy naming where the family follows the version
+    # (`claude-3-5-sonnet`, `claude-3-5-haiku`).
     best = None
     for k, v in MODEL_DISPLAY.items():
         if k in key and (best is None or len(k) > len(best[0])):
@@ -526,25 +773,66 @@ def render(payload: dict, pricing: dict) -> str:
     msgs = _walk_cached()
     lifetime_cost = all_time_cost(pricing, msgs=msgs)
     today = today_cost(pricing, msgs=msgs)
-    block_start, block_cost, time_left, rate = current_block_and_burn(pricing, msgs=msgs)
+    week_cost = weekly_cost(pricing, msgs=msgs)
+    _block_start, block_cost, _time_left, rate = current_block_and_burn(pricing, msgs=msgs)
 
-    ctx_tokens = last_context_tokens(payload.get("transcript_path", ""))
+    transcript_path = payload.get("transcript_path", "")
+    ctx_tokens = last_context_tokens(transcript_path)
     limit = context_limit(model_id)
     pct = int(round(100 * ctx_tokens / limit)) if limit else 0
-    ctx_str = f"{fmt_tokens(ctx_tokens)} ({pct}%)" if ctx_tokens else "N/A"
+    if ctx_tokens:
+        ctx_str = f"{_color_ctx(pct)}{fmt_tokens(ctx_tokens)} ({pct}%){_RESET}"
+    else:
+        ctx_str = "N/A"
 
-    cost_section = (
-        f"{fmt_money(lifetime_cost)} total"
-        f" / {fmt_money(today)} today"
-        f" / {fmt_money(block_cost)} block ({fmt_time_left(time_left)})"
+    cache_ratio, cache_reads, cache_inputs = session_cache_ratio(transcript_path)
+    if cache_reads + cache_inputs > 0:
+        cache_pct = int(round(cache_ratio * 100))
+        cache_str = f"{_color_cache(cache_ratio)}{cache_pct}%{_RESET}"
+    else:
+        cache_str = f"{_DIM}—{_RESET}"
+
+    # Budget remaining — prefer the real Anthropic quota from the OAuth
+    # usage endpoint; USD heuristic is the fallback when the fetch fails,
+    # the user has disabled outbound calls, or the credential file is gone.
+    # The real quota is what Claude Code actually throttles against, so
+    # matching it means the color zones line up with actual risk of hitting
+    # a cap mid-turn.
+    usage = usage_fetcher.refresh_if_stale() if usage_fetcher is not None else None
+    if usage and "sess_pct_left" in usage and "week_pct_left" in usage:
+        sess_left = usage["sess_pct_left"] / 100.0
+        week_left = usage["week_pct_left"] / 100.0
+    else:
+        week_cost = weekly_cost(pricing, msgs=msgs)
+        sess_limit, week_limit = _budget_limits()
+        sess_left = max(0.0, 1.0 - block_cost / sess_limit) if sess_limit > 0 else 1.0
+        week_left = max(0.0, 1.0 - week_cost / week_limit) if week_limit > 0 else 1.0
+    budget_section = (
+        f"{_color_budget(sess_left)}sess {int(sess_left * 100)}%{_RESET}"
+        f" · {_color_budget(week_left)}week {int(week_left * 100)}%{_RESET}"
     )
-    burn_section = f"{fmt_money(rate)}/hr" if rate > 0 else f"{fmt_money(0)}/hr"
+
+    cost_section = f"{fmt_money(lifetime_cost)} total / {fmt_money(today)} today"
+    # Burn rate: prefer %/hr of the 5h session quota (derived from the rolling
+    # utilization history in usage.json) since that's the metric that actually
+    # maps to "when will I hit the cap". Falls back to USD/hr when the quota
+    # fetcher is disabled or hasn't accumulated enough samples yet.
+    sess_burn = usage_fetcher.burn_pct_per_hour(usage) if (usage_fetcher and usage) else None
+    if sess_burn is not None:
+        burn_color = _color_sess_burn(sess_burn)
+        burn_section = f"{burn_color}{int(round(sess_burn))}%/hr{_RESET}"
+    else:
+        burn_usd = float(rate or 0)
+        burn_color = _color_burn(burn_usd) if burn_usd > 0 else ""
+        burn_section = f"{burn_color}{fmt_money(rate)}/hr{_RESET if burn_color else ''}"
 
     return (
         f"\U0001F916 {name} | "
         f"\U0001F4B0 {cost_section} | "
+        f"\U0001F3AF {budget_section} | "
         f"\U0001F525 {burn_section} | "
-        f"\U0001F9E0 {ctx_str}"
+        f"\U0001F9E0 {ctx_str} | "
+        f"\U0001F4BE {cache_str}"
     )
 
 

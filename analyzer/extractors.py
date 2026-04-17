@@ -9,6 +9,8 @@ Event kinds:
 - `tool_use`:        tool call emitted by assistant
 - `tool_result`:     tool result (size, truncation flag)
 - `compact`:         autocompact marker
+- `fetch_call`:      paired tool invocation from the Tokenomy fetch-audit hook
+                     log (carries wall-clock duration + precise output bytes)
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Iterator, Optional
 
 log = logging.getLogger(__name__)
@@ -23,7 +26,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Event:
-    kind: str                       # assistant_usage | tool_use | tool_result | compact
+    kind: str                       # assistant_usage | tool_use | tool_result | compact | fetch_call
     ts: Optional[str] = None
     session_id: Optional[str] = None
     project: Optional[str] = None
@@ -43,6 +46,8 @@ class Event:
     is_error: bool = False    # tool_result.is_error — benign 99.5% of the time
     # unended assistant text (used for counterfactual loss heuristic)
     text_tail: Optional[str] = None
+    # fetch_call (from Tokenomy fetch-audit hook log)
+    duration_ms: int = 0
 
 
 _TRUNCATION_MARKERS = ("Response truncated", "[truncated]", "…(truncated)")
@@ -187,10 +192,95 @@ def _tail_text(content: Any, n: int = 80) -> Optional[str]:
     return text[-n:]
 
 
-def iter_corpus(root: str) -> Iterator[tuple[str, Iterator[Event]]]:
-    """Yield (path, event_iter) for every *.jsonl file under root."""
+DEFAULT_FETCH_LOG = os.path.expanduser("~/.claude/tokenomy/fetch-log.jsonl")
+
+
+def _parse_iso_ms(ts: str) -> Optional[float]:
+    """Return epoch-ms for an ISO 8601 string, or None on parse failure."""
+    if not ts:
+        return None
+    try:
+        s = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+        return datetime.fromisoformat(s).timestamp() * 1000.0
+    except (ValueError, AttributeError):
+        return None
+
+
+def iter_fetch_log(path: str) -> Iterator[Event]:
+    """Stream `fetch_call` Events from the Tokenomy fetch-audit hook log.
+
+    Only `phase == "post"` records are emitted. When a matching `phase == "pre"`
+    line appeared earlier (same session_id + input_hash + tool_name), we subtract
+    its timestamp from the post ts to recover wall-clock duration — the hook
+    payload's own `duration_ms` field is zero for most Claude Code tool calls
+    because the harness doesn't populate it.
+
+    The pending-pre dict is pruned as matches land, so memory stays bounded
+    by the count of outstanding tool calls (normally single digits).
+    """
+    try:
+        f = open(path, "r", encoding="utf-8", errors="replace")
+    except OSError as e:
+        log.warning("cannot open fetch-log %s: %s", path, e)
+        return
+    pending: dict[tuple[str, str, str], str] = {}
+    with f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                log.debug("malformed fetch-log line %s:%d", path, lineno)
+                continue
+            if not isinstance(rec, dict):
+                continue
+            key = (
+                rec.get("session_id") or "",
+                rec.get("input_hash") or "",
+                rec.get("tool_name") or "",
+            )
+            phase = rec.get("phase")
+            if phase == "pre":
+                pending[key] = rec.get("ts") or ""
+                continue
+            if phase != "post":
+                continue
+            duration_ms = int(rec.get("duration_ms") or 0)
+            pre_ts = pending.pop(key, "")
+            if pre_ts:
+                t0 = _parse_iso_ms(pre_ts)
+                t1 = _parse_iso_ms(rec.get("ts") or "")
+                if t0 is not None and t1 is not None and t1 > t0:
+                    duration_ms = int(t1 - t0)
+            yield Event(
+                kind="fetch_call",
+                ts=rec.get("ts"),
+                session_id=rec.get("session_id") or None,
+                tool_name=rec.get("tool_name") or None,
+                response_size_bytes=int(rec.get("output_bytes") or 0),
+                duration_ms=duration_ms,
+                input_summary={"input_hash": rec.get("input_hash", "")},
+            )
+
+
+def iter_corpus(
+    root: str,
+    fetch_log: Optional[str] = None,
+) -> Iterator[tuple[str, Iterator[Event]]]:
+    """Yield (path, event_iter) for every *.jsonl session file under root.
+
+    If `fetch_log` is provided (and the file exists), it is yielded as a
+    parallel virtual stream keyed by session_id. Events from the fetch log
+    can be merged into per-session aggregation just like native session
+    events — their `session_id` matches the Claude Code sessions that
+    produced them.
+    """
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
             if name.endswith(".jsonl"):
                 path = os.path.join(dirpath, name)
                 yield path, iter_session_file(path)
+    if fetch_log and os.path.exists(fetch_log):
+        yield fetch_log, iter_fetch_log(fetch_log)

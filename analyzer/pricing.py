@@ -15,14 +15,25 @@ log = logging.getLogger(__name__)
 
 PRICING_UPDATED_AT = "2026-04"  # YYYY-MM — bump when refreshing table
 
-# USD per 1,000,000 tokens.
+# USD per 1,000,000 tokens. Kept in sync with hooks/pricing.json — when a
+# model is added there, mirror it here. Field name `cache_write_5m` matches
+# the statusline table so both subsystems can eventually share one source.
+# `[1m]` variants carry the elevated >200k-context rates (tier_1m in the
+# hooks table) so long-context sessions price correctly in the analyzer.
 PRICING: Dict[str, Dict[str, float]] = {
-    "claude-opus-4-6":           {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read":  1.50},
-    "claude-opus-4-6[1m]":       {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read":  1.50},
-    "claude-sonnet-4-6":         {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read":  0.30},
-    "claude-sonnet-4-6[1m]":     {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read":  0.30},
-    "claude-haiku-4-5":          {"input":  1.00, "output":  5.00, "cache_write":  1.25, "cache_read":  0.10},
-    "claude-haiku-4-5-20251001": {"input":  1.00, "output":  5.00, "cache_write":  1.25, "cache_read":  0.10},
+    "claude-opus-4-7":           {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read":  1.50},
+    "claude-opus-4-6":           {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read":  1.50},
+    "claude-opus-4-5":           {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read":  1.50},
+    "claude-opus-4-1":           {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read":  1.50},
+    "claude-opus-4":             {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read":  1.50},
+    "claude-sonnet-4-6":         {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read":  0.30},
+    "claude-sonnet-4-6[1m]":     {"input":  6.00, "output": 22.50, "cache_write_5m":  7.50, "cache_write_1h": 12.00, "cache_read":  0.60},
+    "claude-sonnet-4-5":         {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read":  0.30},
+    "claude-sonnet-4":           {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read":  0.30},
+    "claude-haiku-4-5":          {"input":  1.00, "output":  5.00, "cache_write_5m":  1.25, "cache_write_1h":  2.00, "cache_read":  0.10},
+    "claude-haiku-4-5-20251001": {"input":  1.00, "output":  5.00, "cache_write_5m":  1.25, "cache_write_1h":  2.00, "cache_read":  0.10},
+    "claude-3-5-sonnet":         {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read":  0.30},
+    "claude-3-5-haiku":          {"input":  0.80, "output":  4.00, "cache_write_5m":  1.00, "cache_write_1h":  1.60, "cache_read":  0.08},
 }
 
 DEFAULT_PRICING_KEY = "claude-sonnet-4-6"
@@ -77,7 +88,7 @@ def cost_for_usage(
         return 0.0
     return (
         input_tokens * p["input"]
-        + cache_creation_tokens * p["cache_write"]
+        + cache_creation_tokens * p["cache_write_5m"]
         + cache_read_tokens * p["cache_read"]
         + output_tokens * p["output"]
     ) / 1_000_000

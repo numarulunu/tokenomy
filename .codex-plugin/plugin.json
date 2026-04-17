@@ -1,0 +1,44 @@
+{
+  "name": "tokenomy",
+  "version": "1.0.1",
+  "description": "Codex-native token discipline, project hygiene, hooks, and session analysis adapted from Tokenomy.",
+  "author": {
+    "name": "Ionut Rosu",
+    "url": "https://github.com/numarulunu"
+  },
+  "homepage": "https://github.com/numarulunu/tokenomy",
+  "repository": "https://github.com/numarulunu/tokenomy",
+  "license": "MIT",
+  "keywords": [
+    "tokens",
+    "codex",
+    "optimization",
+    "hooks",
+    "context",
+    "efficiency"
+  ],
+  "skills": "./skills/",
+  "hooks": "./codex-hooks.json",
+  "interface": {
+    "displayName": "Tokenomy",
+    "shortDescription": "Keep Codex sessions tight, readable, and cheap.",
+    "longDescription": "Tokenomy for Codex adds compact working rules, project setup guidance, lightweight hooks, and session analysis without changing source code.",
+    "developerName": "Ionut Rosu",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/numarulunu/tokenomy",
+    "privacyPolicyURL": "https://github.com/numarulunu/tokenomy",
+    "termsOfServiceURL": "https://github.com/numarulunu/tokenomy",
+    "defaultPrompt": [
+      "Audit this repo for Codex token waste.",
+      "Set up Codex token discipline here.",
+      "Analyze my Codex session tokens."
+    ],
+    "brandColor": "#111111",
+    "screenshots": []
+  }
+}

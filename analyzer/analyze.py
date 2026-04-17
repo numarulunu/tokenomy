@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from . import __version__, counterfactual, pricing, report
-from .extractors import Event, iter_session_file
+from .extractors import DEFAULT_FETCH_LOG, Event, iter_fetch_log, iter_session_file
 
 log = logging.getLogger("tokenomy.analyzer")
 
@@ -97,6 +97,12 @@ class Aggregator:
         # Per-tool
         self.by_tool: Dict[str, ToolStats] = defaultdict(ToolStats)
         self.tool_cost: Dict[str, float] = defaultdict(float)
+        # Fetch-audit hook stream: independent of session JSONL, carries the
+        # true output bytes (utf-8) + wall-clock duration for every tool call.
+        # Kept in its own bucket so we don't double-count with by_tool, which
+        # is already populated from session tool_result events.
+        self.by_fetch_tool: Dict[str, ToolStats] = defaultdict(ToolStats)
+        self.fetch_duration_ms: Dict[str, int] = defaultdict(int)
         # Per-project
         self.by_project: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {"sessions": set(), "tokens": 0, "cost": 0.0}
@@ -151,21 +157,25 @@ class Aggregator:
             self._on_tool_result(ev)
         elif ev.kind == "compact":
             self.compact_count += 1
+        elif ev.kind == "fetch_call":
+            self._on_fetch_call(ev)
 
     def _on_assistant_usage(self, ev: Event) -> None:
         self.input_tokens += ev.input_tokens
         self.output_tokens += ev.output_tokens
         self.cache_read_tokens += ev.cache_read_tokens
         self.cache_creation_tokens += ev.cache_creation_tokens
-        # Exclude cache_read from the headline cost: Claude Code reports the
-        # cumulative cache per turn, so summing across turns double-counts
-        # massively. We still record cache_read_tokens in totals for visibility.
+        # Per-Anthropic API spec, usage.cache_read_input_tokens is per-message
+        # (tokens read from cache on this specific request), not cumulative.
+        # Previously this was zeroed out on a double-counting assumption that
+        # never actually held, silently stripping 30–50% of real spend on
+        # cache-heavy Sonnet sessions. Pass the real value.
         cost = pricing.cost_for_usage(
             ev.model or pricing.DEFAULT_PRICING_KEY,
             ev.input_tokens,
             ev.output_tokens,
             ev.cache_creation_tokens,
-            cache_read_tokens=0,
+            cache_read_tokens=ev.cache_read_tokens,
             table=self.pricing_table,
         )
         self.cost_usd += cost
@@ -284,6 +294,11 @@ class Aggregator:
             # stash _last_tool for later reaction update
             self.reactions.setdefault(ev.tool_use_id, {})["_last_tool"] = tname
 
+    def _on_fetch_call(self, ev: Event) -> None:
+        tname = ev.tool_name or "unknown"
+        self.by_fetch_tool[tname].add(ev.response_size_bytes)
+        self.fetch_duration_ms[tname] += int(ev.duration_ms or 0)
+
     def _flush_session(self) -> None:
         # Credit duplicate reads: for each key seen >1 times, the extra copies
         # are wasted. We don't know per-read sizes here, so approximate by
@@ -327,6 +342,22 @@ class Aggregator:
                     ),
                     2,
                 ),
+            }
+
+        # Fetch-audit stats: populated from the PostToolUse hook log. Separate
+        # bucket from by_tool because it measures the same calls on a different
+        # axis (wall-clock duration + utf-8 bytes, not truncated text length).
+        by_fetch_tool_out: Dict[str, Any] = {}
+        for name, s in self.by_fetch_tool.items():
+            pct = s.percentiles()
+            by_fetch_tool_out[name] = {
+                "count": s.count,
+                "total_bytes": s.total_bytes,
+                "p50": pct["p50"],
+                "p95": pct["p95"],
+                "p99": pct["p99"],
+                "max": s.max_size,
+                "total_duration_ms": int(self.fetch_duration_ms.get(name, 0)),
             }
 
         # By project
@@ -413,6 +444,7 @@ class Aggregator:
                 "cost_usd": round(self.cost_usd, 2),
             },
             "by_tool": by_tool_out,
+            "by_fetch_tool": by_fetch_tool_out,
             "by_project": by_project_out,
             "by_hour": {str(h): self.by_hour.get(h, 0) for h in range(24)},
             "counterfactuals": cfs,
@@ -479,6 +511,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json-out", default=DEFAULT_OUT)
     ap.add_argument("--pricing-file", help="JSON file overriding the pricing table")
     ap.add_argument("--no-report", action="store_true")
+    ap.add_argument("--fetch-log", default=DEFAULT_FETCH_LOG,
+                    help="path to Tokenomy fetch-audit log (default ~/.claude/tokenomy/fetch-log.jsonl)")
+    ap.add_argument("--no-fetch-log", action="store_true",
+                    help="skip the fetch-audit log even if it exists")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -486,11 +522,6 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-
-    # Pricing freshness check
-    age = pricing.pricing_age_months()
-    if age > 3:
-        log.warning("pricing table is %d months old (PRICING_UPDATED_AT=%s)", age, pricing.PRICING_UPDATED_AT)
 
     table = pricing.PRICING
     if args.pricing_file:
@@ -518,10 +549,17 @@ def main(argv: list[str] | None = None) -> int:
                 events += 1
                 agg.process_event(ev)
 
+    fetch_events = 0
+    if not args.no_fetch_log and args.fetch_log and os.path.exists(args.fetch_log):
+        for ev in iter_fetch_log(args.fetch_log):
+            fetch_events += 1
+            agg.process_event(ev)
+
     insights = agg.finalize(since=since, until=now)
     insights["output_path"] = args.json_out
     insights["files_scanned"] = files
     insights["events_processed"] = events
+    insights["fetch_events_processed"] = fetch_events
 
     os.makedirs(os.path.dirname(args.json_out), exist_ok=True)
     with open(args.json_out, "w", encoding="utf-8") as f:

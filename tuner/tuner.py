@@ -1,4 +1,4 @@
-"""tokenomy v0.4.0 auto-tuner main entrypoint.
+"""tokenomy v0.6.0 auto-tuner main entrypoint.
 
 Pure functions:
 - compute_caps_per_setting(corpus_stats) -> proposed caps
@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
 from analyzer.extractors import Event, iter_corpus
+from tuner import auto_rules
 from tuner.losses import detect_all, detect_user_pinned
 from tuner.settings_writer import FLOORS, merge_into_user_settings
 from tuner.state import empty_state, load_state, save_state
@@ -47,9 +48,11 @@ def _server_matches(server: str, allow: set[str]) -> bool:
         return True
     if server in allow:
         return True
-    # fuzzy: "plugin_context7_context7" counts as "context7"
+    # fuzzy: "plugin_context7_context7" counts as "context7". Guard on
+    # len(a) >= 4 so 2/3-char tokens can't collapse every server into a
+    # single allow-list bucket (e.g. "k" matching "kontext" and "skool").
     low = server.lower()
-    return any(a in low for a in allow)
+    return any(len(a) >= 4 and a.lower() in low for a in allow)
 
 
 def collect_samples(
@@ -347,6 +350,13 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
+    # Windows consoles default to cp1252, which crashes on arrows/emoji in
+    # _print_diff. Reconfiguring once here keeps every `print()` utf-8-safe.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -374,8 +384,14 @@ def main(argv: List[str] | None = None) -> int:
     state = load_state(applied_path)
 
     if args.first_run:
-        from tuner.consent import write_consent_summary
+        from tuner.consent import has_consent, write_consent_summary
         from tuner.settings_writer import BASELINE_ENV
+        # Idempotent guard: a SessionStart hook can fire --first-run on every
+        # session. Re-running past the initial install would blow tuned caps
+        # away with the baseline-only block. Bail after the first pass.
+        if has_consent(home):
+            log.info("first-run: consent already recorded — skipping")
+            return 0
         summary_path = write_consent_summary(home, BASELINE_ENV)
         merge_into_user_settings(
             args.user_settings,
@@ -422,43 +438,77 @@ def main(argv: List[str] | None = None) -> int:
         state["effective_n"] = stats["effective_n"]
         state["confidence"] = confidence(stats["effective_n"])
 
+        # Capture pre-hysteresis caps so force-loosen compares against the
+        # caps that were actually in effect this session, not the freshly
+        # reduced ones produced a few lines below.
+        old_caps_snapshot = dict(state.get("caps") or {})
+
         if stats["effective_n"] < MIN_EFFECTIVE_N:
             log.info(
-                "confidence too low (effective_n=%.1f < %d) — writing baseline only",
+                "confidence too low (effective_n=%.1f < %d) — preserving existing caps",
                 stats["effective_n"], MIN_EFFECTIVE_N,
             )
-            final = {}
+            # Preserve existing caps instead of wiping them — a quiet day must
+            # not nuke tuned values and fall back to baselines.
+            final = old_caps_snapshot
         else:
             final, state = apply_hysteresis_cooldown_freeze(state, proposed)
-        # Control loop: track rolling mean output tokens
-        if stats["out_tokens"]:
-            current_median = weighted_percentile(stats["out_tokens"], 0.50)
-            old_mean = state.get("rolling_mean_output", 0.0)
-            old_n = state.get("rolling_mean_n", 0.0)
-            alpha = 0.3  # EMA smoothing factor
-            if old_n > 0:
-                state["rolling_mean_output"] = old_mean * (1 - alpha) + current_median * alpha
-            else:
-                state["rolling_mean_output"] = current_median
-            state["rolling_mean_n"] = old_n + stats["effective_n"]
+            # Control loop: track rolling mean output tokens. Gated on
+            # effective_n so low-signal days don't pollute the EMA with a
+            # sparse sample's median.
+            if stats["out_tokens"]:
+                current_median = weighted_percentile(stats["out_tokens"], 0.50)
+                old_mean = state.get("rolling_mean_output", 0.0)
+                seeded = state.get("rolling_mean_seeded", False)
+                alpha = 0.3  # EMA smoothing factor
+                if seeded:
+                    state["rolling_mean_output"] = old_mean * (1 - alpha) + current_median * alpha
+                else:
+                    state["rolling_mean_output"] = current_median
+                    state["rolling_mean_seeded"] = True
 
-        # Force-loosen: if current cap < 0.9 * rolling mean, zero cooldown
-        rolling = state.get("rolling_mean_output", 0.0)
-        if rolling > 0:
-            cap_key = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
-            old_cap = int((state.get("caps") or {}).get(cap_key, 0))
-            if old_cap > 0 and old_cap < 0.9 * rolling:
-                cd = state.get("cooldowns", {}).get(cap_key)
-                if cd:
-                    cd["sessions_remaining"] = 0
-                    log.info("force-loosen: %s cap %d < 0.9 * rolling mean %.0f", cap_key, old_cap, rolling)
+            # Force-loosen: if the cap THAT WAS in effect this session is
+            # under-serving the rolling mean, drop its cooldown so the next
+            # pass can loosen. Uses old_caps_snapshot so we don't compare
+            # against caps that hysteresis just tightened a moment ago.
+            rolling = state.get("rolling_mean_output", 0.0)
+            if rolling > 0:
+                cap_key = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+                old_cap = int(old_caps_snapshot.get(cap_key, 0))
+                if old_cap > 0 and old_cap < 0.9 * rolling:
+                    cd = state.get("cooldowns", {}).get(cap_key)
+                    if cd:
+                        cd["sessions_remaining"] = 0
+                        log.info("force-loosen: %s cap %d < 0.9 * rolling mean %.0f", cap_key, old_cap, rolling)
 
         state["last_tune_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Auto-rules: idle-gap analysis, unused MCP, big-file reads.
+        # Runs on last 14d of corpus; produces env overlays (auto-applied) and
+        # human-reviewed suggestions (written to _suggestions.md).
+        auto_results: Dict[str, Any] = {"env_overlays": {}, "suggestions": {}, "decisions": []}
+        try:
+            if os.path.exists(args.corpus_root):
+                recent = auto_rules.collect_recent_events(args.corpus_root)
+                current_env = _load_current_env(args.user_settings)
+                auto_results = auto_rules.run(
+                    recent,
+                    current_env=current_env,
+                    active_servers=DEFAULT_MCP_ALLOW,
+                )
+                sugg_path = os.path.join(home, "_suggestions.md")
+                with open(sugg_path, "w", encoding="utf-8") as f:
+                    f.write(auto_rules.render_suggestions_md(auto_results))
+                log.info("auto_rules: %d decisions, wrote %s", len(auto_results["decisions"]), sugg_path)
+        except Exception as e:  # fail-open: never let auto-rules block tuner
+            log.warning("auto_rules failed: %s", e)
 
         if args.dry_run:
             _print_diff(load_state(applied_path).get("caps", {}), final)
             print(f"effective_n: {stats['effective_n']:.1f}  confidence: {state['confidence']:.2f}")
             print(f"losses detected: {len(losses)}")
+            if auto_results["env_overlays"]:
+                print(f"auto-rule overlays: {auto_results['env_overlays']}")
             return 0
 
         user_pinned = state.get("user_pinned") or []
@@ -466,6 +516,7 @@ def main(argv: List[str] | None = None) -> int:
             args.user_settings,
             final,
             user_pinned=user_pinned,
+            env_overlays=auto_results["env_overlays"],
         )
         save_state(applied_path, state)
         log.info("merged %d env keys into %s; wrote %s", len(merged), args.user_settings, applied_path)
@@ -481,6 +532,24 @@ def main(argv: List[str] | None = None) -> int:
                 os.rmdir(lock_dir)
         except OSError:
             pass
+
+
+def _load_current_env(user_settings_path: str) -> Dict[str, str]:
+    """Read the `env` block from user's settings.json; return {} on any failure."""
+    import json as _json
+    if not os.path.exists(user_settings_path):
+        return {}
+    try:
+        with open(user_settings_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    env = data.get("env")
+    if not isinstance(env, dict):
+        return {}
+    return {k: str(v) for k, v in env.items() if isinstance(v, (str, int, float))}
 
 
 def _strip_managed_env(user_settings_path: str) -> None:

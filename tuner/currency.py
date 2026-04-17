@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from typing import Tuple
 
 CONFIG_DIR = os.path.expanduser("~/.claude/tokenomy")
@@ -86,8 +87,19 @@ def save_currency(code: str, rate: float | None = None, symbol: str | None = Non
         rate = float(rate)
     cfg = {"code": code, "symbol": symbol, "rate_to_usd": rate}
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    # Atomic write: crash mid-write used to leave a zero-byte file, which
+    # load_currency silently reset to USD — losing the user's choice.
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".currency.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, CONFIG_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return cfg
 
 

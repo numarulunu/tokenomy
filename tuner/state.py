@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.6.0"
 
 
 def empty_state() -> Dict[str, Any]:
@@ -24,7 +24,7 @@ def empty_state() -> Dict[str, Any]:
         "user_pinned": [],
         "estimated_savings_usd_per_month": 0.0,
         "rolling_mean_output": 0.0,
-        "rolling_mean_n": 0.0,
+        "rolling_mean_seeded": False,
     }
 
 
@@ -63,7 +63,7 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".applied.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
+            json.dump(state, f, indent=2, sort_keys=False)
         os.replace(tmp, path)
     except Exception:
         try:

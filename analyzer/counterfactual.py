@@ -114,11 +114,19 @@ def max_output_cap(
     }
 
 
-def read_once_savings(duplicate_read_bytes: int, duplicate_read_count: int) -> Dict[str, Any]:
-    """Already-observed savings from the read-once hook (or what it WOULD save)."""
+def read_once_savings(
+    duplicate_read_bytes: int,
+    duplicate_read_count: int,
+    model: str | None = None,
+) -> Dict[str, Any]:
+    """Already-observed savings from the read-once hook (or what it WOULD save).
+
+    `model` controls the pricing key; defaults to the analyzer's mid-tier
+    baseline when callers don't know which model produced the reads.
+    """
     tokens_saved = _chars_to_tokens(duplicate_read_bytes)
     dollars_saved = P.cost_for_usage(
-        P.DEFAULT_PRICING_KEY, input_tokens=tokens_saved, output_tokens=0
+        model or P.DEFAULT_PRICING_KEY, input_tokens=tokens_saved, output_tokens=0
     )
     return {
         "setting": "read-once hook",
@@ -130,11 +138,15 @@ def read_once_savings(duplicate_read_bytes: int, duplicate_read_count: int) -> D
     }
 
 
-def log_grep_savings(log_read_bytes_over_threshold: int, threshold_chars: int = 5000) -> Dict[str, Any]:
+def log_grep_savings(
+    log_read_bytes_over_threshold: int,
+    threshold_chars: int = 5000,
+    model: str | None = None,
+) -> Dict[str, Any]:
     """Savings if all log reads were filtered to ~threshold chars."""
     tokens_saved = _chars_to_tokens(log_read_bytes_over_threshold)
     dollars_saved = P.cost_for_usage(
-        P.DEFAULT_PRICING_KEY, input_tokens=tokens_saved, output_tokens=0
+        model or P.DEFAULT_PRICING_KEY, input_tokens=tokens_saved, output_tokens=0
     )
     return {
         "setting": "log-grep hook",

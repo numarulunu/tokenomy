@@ -3,7 +3,8 @@
 # When Read targets a log file, replace content with: error/warn lines + last 50.
 # Fails open on any error.
 
-set -u
+# Dropped `set -u` — the approve() fail-open path has to be reachable from
+# every error branch, and any unset-var abort would skip the final exit 0.
 
 CACHE_DIR="$HOME/.claude/tokenomy"
 TMP_DIR="$CACHE_DIR/tmp"
@@ -118,4 +119,9 @@ printf '%s' "$FILTERED" | python -c '
 import json, sys
 content = sys.stdin.read()
 print(json.dumps({"decision": "block", "reason": content}))
-'
+' 2>/dev/null || approve
+
+# Guarantee a clean exit even if the final pipeline above silently failed.
+# Previously the script exited with the pipeline's return code, which could
+# surface as a non-zero hook result and block the Read tool.
+exit 0

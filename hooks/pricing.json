@@ -1,8 +1,15 @@
 {
   "_comment": "Prices are USD per 1M tokens. Source: LiteLLM model_prices_and_context_window.json. Updated automatically by tool-auditor. Keys are substrings matched against the model id (lowercased, longest match wins).",
-  "_updated": "2026-04-07",
+  "_updated": "2026-04-17",
   "_source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
   "models": {
+    "claude-opus-4-7": {
+      "input": 15.0,
+      "output": 75.0,
+      "cache_write_5m": 18.75,
+      "cache_write_1h": 30.0,
+      "cache_read": 1.5
+    },
     "claude-opus-4-6": {
       "input": 15.0,
       "output": 75.0,

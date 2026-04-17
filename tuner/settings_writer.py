@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 FLOORS = {
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": 4000,
     "MAX_MCP_OUTPUT_TOKENS": 5000,
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": 50,
 }
 
 # Static baselines that used to live in the plugin's settings.json (where the
@@ -34,6 +35,12 @@ BASELINE_ENV: Dict[str, str] = {
     "ENABLE_TOOL_SEARCH": "true",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "DISABLE_TELEMETRY": "1",
+    # CLAUDE_CODE_AUTO_COMPACT_WINDOW is intentionally NOT baked in. The
+    # statusline's context_limit() already picks 1M for "*1m*" model ids and
+    # 200k otherwise, so a static baseline would miscalibrate the %display
+    # against the real model window (e.g. 1M override on opus-4-7 made
+    # autocompact look like it fired at 16-20%). If the user opts into a 1M
+    # working window explicitly, they can set this themselves.
 }
 
 SENTINEL_KEY = "__tokenomy__"
@@ -108,7 +115,8 @@ def merge_into_user_settings(
     user_pinned: Optional[Iterable[str]] = None,
     per_server_supported: bool = False,
     baseline: Optional[Dict[str, str]] = None,
-    version: str = "0.4.0",
+    version: str = "0.6.0",
+    env_overlays: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Atomically merge tokenomy-managed env keys into the user's settings.json.
 
@@ -126,13 +134,19 @@ def merge_into_user_settings(
 
     tuned = build_env_block(caps, per_server_supported=per_server_supported)
 
-    # Compose the tokenomy-managed env. Tuned values win over static baselines.
+    # Compose the tokenomy-managed env. Order: baseline → tuned caps → auto-rule
+    # overlays. Overlays win last so they can flip static baselines (e.g. toggle
+    # ENABLE_PROMPT_CACHING_1H back to "0" when idle-gap pattern shifts).
     managed: Dict[str, str] = {}
     for k, v in base.items():
         if k in pinned:
             continue
         managed[k] = v
     for k, v in tuned.items():
+        if k in pinned:
+            continue
+        managed[k] = v
+    for k, v in (env_overlays or {}).items():
         if k in pinned:
             continue
         managed[k] = v

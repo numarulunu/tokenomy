@@ -3,7 +3,8 @@
 # Blocks redundant Read tool calls on unchanged files within a session.
 # Fails open on any error (never blocks a legitimate read).
 
-set -u
+# Dropped `set -u` — approve() is the fail-open escape hatch and every
+# variable in this hook is already defensively defaulted or guarded.
 
 CACHE_DIR="$HOME/.claude/tokenomy"
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
@@ -42,14 +43,22 @@ LIMIT=$(printf '%s' "$PARSED" | awk -F'\t' '{print $4}')
 [ -z "$FPATH" ] && approve
 [ ! -f "$FPATH" ] && approve
 
-MTIME=$(python -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$FPATH" 2>/dev/null) || approve
+# File identity signature: mtime + size. Previously mtime alone blocked
+# legitimate re-reads after same-second edits (Windows NTFS / fast editors)
+# because integer-second mtime hadn't advanced. Adding size substantially
+# narrows the false-negative window at no real cost.
+SIG=$(python -c "import os,sys; st=os.stat(sys.argv[1]); print(f'{int(st.st_mtime)}:{st.st_size}')" "$FPATH" 2>/dev/null) || approve
 
 CACHE="$CACHE_DIR/read-cache-${SID}.json"
 KEY="${FPATH}|${OFFSET}|${LIMIT}"
 
-RESULT=$(python - "$CACHE" "$KEY" "$MTIME" <<'PY' 2>/dev/null
+# Note on the cache write below: `json.dump` has no timeout. On slow disks /
+# NFS / AV scan, the 5s hook timeout can be consumed by the write. The
+# `except Exception: pass` keeps writes best-effort but won't catch a hang;
+# operators on such filesystems should disable this hook entirely.
+RESULT=$(python - "$CACHE" "$KEY" "$SIG" <<'PY' 2>/dev/null
 import json, sys, os, time
-cache_path, key, mtime = sys.argv[1], sys.argv[2], int(sys.argv[3])
+cache_path, key, sig = sys.argv[1], sys.argv[2], sys.argv[3]
 data = {}
 try:
     if os.path.exists(cache_path):
@@ -61,10 +70,10 @@ except Exception:
     data = {}
 
 prev = data.get(key)
-if isinstance(prev, dict) and prev.get("mtime") == mtime:
+if isinstance(prev, dict) and prev.get("sig") == sig:
     print("BLOCK\t" + prev.get("ts", "earlier"))
 else:
-    data[key] = {"mtime": mtime, "ts": time.strftime("%H:%M:%S")}
+    data[key] = {"sig": sig, "ts": time.strftime("%H:%M:%S")}
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f)

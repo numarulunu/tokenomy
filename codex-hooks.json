@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"./codex/hook.py\" session-start",
+            "timeout": 5,
+            "statusMessage": "Preparing Tokenomy for Codex..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"./codex/hook.py\" log-grep",
+            "timeout": 5,
+            "statusMessage": "Filtering large logs..."
+          },
+          {
+            "type": "command",
+            "command": "python \"./codex/hook.py\" read-once",
+            "timeout": 5,
+            "statusMessage": "Checking repeated reads..."
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"./codex/hook.py\" cleanup",
+            "timeout": 5,
+            "statusMessage": "Cleaning Tokenomy cache..."
+          }
+        ]
+      }
+    ]
+  }
+}

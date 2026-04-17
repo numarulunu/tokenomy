@@ -17,6 +17,16 @@ _LABELS = {
 }
 
 
+def has_consent(home_dir: str) -> bool:
+    """True once `consent-summary.txt` has been written in `home_dir`.
+
+    Used to make `--first-run` idempotent: subsequent invocations skip the
+    baseline-only write-and-explain step so repeated `SessionStart` triggers
+    don't clobber tuned caps with baselines.
+    """
+    return os.path.exists(os.path.join(home_dir, "consent-summary.txt"))
+
+
 def write_consent_summary(home_dir: str, baseline_env: Dict[str, str]) -> str:
     """Write a human-readable summary of what Tokenomy manages. Returns path."""
     path = os.path.join(home_dir, "consent-summary.txt")

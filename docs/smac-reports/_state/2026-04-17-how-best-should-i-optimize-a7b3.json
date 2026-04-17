@@ -1,0 +1,16 @@
+{
+  "run_id": "2026-04-17-how-best-should-i-optimize-a7b3",
+  "question": "How best should I optimize this codebase?",
+  "started_at": "2026-04-17T00:51:39+03:00",
+  "status": "COMPLETE",
+  "completed_at": "2026-04-17T01:25:00+03:00",
+  "report_path": "docs/smac-reports/2026-04-17-how-best-should-i-optimize.md",
+  "totals": {
+    "researchers_ok": 5,
+    "verifiers_ok": 5,
+    "findings": 39,
+    "confirmed": 34,
+    "partial": 5,
+    "disputed": 0
+  }
+}
