@@ -164,12 +164,22 @@ def burn_pct_per_hour(cache: dict | None, window: str = "sess") -> float | None:
     if len(pts) < 2:
         return None
     pts.sort(key=lambda p: p[0])
+    # Quota windows roll over (5h session, 7d week), at which point the
+    # "used" percent drops back toward zero. History may span multiple
+    # windows; if we take delta over the whole thing, a reset clamps burn
+    # to 0 and we render "0%/hr" forever. Slice to the most recent window
+    # by starting at the last decrease in the sorted series.
+    start = 0
+    for i in range(1, len(pts)):
+        if pts[i][1] < pts[i - 1][1]:
+            start = i
+    pts = pts[start:]
+    if len(pts) < 2:
+        return None
     span = pts[-1][0] - pts[0][0]
     if span < BURN_MIN_SPAN_SEC:
         return None
     delta = pts[-1][1] - pts[0][1]
-    # Quota can tick down when a sub-window rolls off; treat that as zero
-    # burn rather than negative (which would render nonsensically).
     if delta < 0:
         delta = 0
     return delta * 3600.0 / span

@@ -9,6 +9,7 @@ from tuner.settings_writer import (
     SENTINEL_KEY,
     build_env_block,
     merge_into_user_settings,
+    write_project_settings,
     write_settings,
 )
 
@@ -149,3 +150,64 @@ def test_merge_missing_file_creates_it(tmp_path):
     assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8000"
     # No prior file → no backup expected
     assert not os.path.exists(p + BACKUP_SUFFIX)
+
+
+# ─────────────── per-project writer (Phase 3b) ───────────────
+
+
+def test_write_project_settings_creates_file(tmp_path):
+    result = write_project_settings(str(tmp_path), {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000})
+    assert result == {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8000"}
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    assert settings_path.exists()
+    data = _read(str(settings_path))
+    assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8000"
+    assert data[SENTINEL_KEY]["scope"] == "project"
+    assert data[SENTINEL_KEY]["managed_env_keys"] == ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+
+
+def test_write_project_settings_preserves_unrelated_keys(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps({
+            "env": {"USER_AUTHORED": "keep-me"},
+            "hooks": {"PreToolUse": []},
+        }),
+        encoding="utf-8",
+    )
+    write_project_settings(str(tmp_path), {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000})
+    data = _read(str(claude_dir / "settings.local.json"))
+    assert data["env"]["USER_AUTHORED"] == "keep-me"
+    assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8000"
+    assert data["hooks"] == {"PreToolUse": []}
+
+
+def test_write_project_settings_prunes_no_longer_managed(tmp_path):
+    # First write: two keys managed
+    write_project_settings(
+        str(tmp_path),
+        {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000, "MAX_MCP_OUTPUT_TOKENS": {"s": 5000}},
+    )
+    # Second write: only one key → the other should be pruned
+    write_project_settings(str(tmp_path), {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 9000})
+    data = _read(str(tmp_path / ".claude" / "settings.local.json"))
+    assert "MAX_MCP_OUTPUT_TOKENS" not in data["env"]
+    assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "9000"
+
+
+def test_write_project_settings_respects_user_pinned(tmp_path):
+    result = write_project_settings(
+        str(tmp_path),
+        {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000, "MAX_MCP_OUTPUT_TOKENS": {"s": 5000}},
+        user_pinned=["CLAUDE_CODE_MAX_OUTPUT_TOKENS"],
+    )
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in result
+    assert result["MAX_MCP_OUTPUT_TOKENS"] == "5000"
+
+
+def test_write_project_settings_missing_dir_returns_none(tmp_path):
+    ghost = tmp_path / "does-not-exist"
+    result = write_project_settings(str(ghost), {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 8000})
+    assert result is None
+    assert not (ghost / ".claude").exists()

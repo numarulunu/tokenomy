@@ -236,3 +236,58 @@ def test_report_renders(tmp_path):
     assert "tokenomy analyzer" in text
     assert "$12.34" in text
     assert "MAX_MCP_OUTPUT_TOKENS" in text
+
+
+# ─────────────── project-path decoder (Phase 3b) ───────────────
+
+
+def test_decode_project_path_exact_match(tmp_path):
+    # Build a real dir tree, then run _probe_path with segments that match
+    # exactly (no spaces → no ambiguity).
+    proj = tmp_path / "MyProject"
+    proj.mkdir()
+    from analyzer.extractors import _probe_path
+    # Walk tmp_path's parents to get pre-encoded segments (split every dir with
+    # spaces into multiple segments, since that's what Claude Code's encoder does).
+    # Claude Code encodes `-`, spaces, and path separators identically, so any
+    # dashes/spaces inside a real dir name become individual segments.
+    def _encode_segments(parts):
+        out = []
+        for p in parts:
+            out.extend(p.replace("-", " ").split())
+        return out
+    if sys.platform == "win32":
+        root = tmp_path.drive + "\\"
+        tail_parts = _encode_segments(list(tmp_path.parts[1:]) + ["MyProject"])
+        assert _probe_path(root, tail_parts) == str(proj)
+    else:
+        tail_parts = _encode_segments([s for s in str(proj).split("/") if s])
+        assert _probe_path("/", tail_parts) == str(proj)
+
+
+def test_decode_project_path_missing_returns_none():
+    assert extractors.decode_project_path("C--Users-doesnotexist-nowhere") is None
+    assert extractors.decode_project_path("") is None
+    assert extractors.decode_project_path("no-drive-marker") is None
+
+
+def test_decode_project_path_space_in_dirname(tmp_path):
+    # "Gaming PC" style: encoded segment `Gaming-PC` must resolve via filesystem probe.
+    parent = tmp_path / "Foo Bar"
+    parent.mkdir()
+    (parent / "child").mkdir()
+    from analyzer.extractors import _probe_path
+    # target = "Foo-Bar-child" must resolve to parent/child
+    result = _probe_path(str(tmp_path), ["Foo", "Bar", "child"])
+    assert result == str(parent / "child")
+
+
+def test_decode_project_path_prefers_longest_match(tmp_path):
+    # Both "Foo" and "Foo-Bar" exist at the same level; when encoded target is
+    # "Foo-Bar-leaf", the decoder must consume via "Foo-Bar", not "Foo".
+    (tmp_path / "Foo").mkdir()
+    (tmp_path / "Foo-Bar").mkdir()
+    (tmp_path / "Foo-Bar" / "leaf").mkdir()
+    from analyzer.extractors import _probe_path
+    result = _probe_path(str(tmp_path), ["Foo", "Bar", "leaf"])
+    assert result == str(tmp_path / "Foo-Bar" / "leaf")

@@ -201,6 +201,66 @@ def merge_into_user_settings(
     return managed
 
 
+def write_project_settings(
+    project_path: str,
+    caps: Dict[str, Any],
+    user_pinned: Optional[Iterable[str]] = None,
+    per_server_supported: bool = False,
+) -> Optional[Dict[str, str]]:
+    """Write per-project env caps into `<project_path>/.claude/settings.local.json`.
+
+    Merge semantics mirror merge_into_user_settings: previously-managed keys we
+    no longer set are pruned, pins are respected, the sentinel tracks what
+    tokenomy owns. Project-local files get NO baseline env (baselines live at
+    the user level); only the per-project tuned caps are written here.
+
+    Returns the managed env dict on success; None if the project dir is
+    missing or not writable. Fail-open — never raises."""
+    if not project_path or not os.path.isdir(project_path):
+        log.debug("skip per-project write: %s does not exist", project_path)
+        return None
+    claude_dir = os.path.join(project_path, ".claude")
+    # Test writability against the parent if .claude/ doesn't exist yet, else
+    # against .claude/ itself. Avoids creating an empty .claude/ dir in
+    # read-only mounts just to discover we can't write.
+    probe = claude_dir if os.path.isdir(claude_dir) else project_path
+    if not os.access(probe, os.W_OK):
+        log.info("skip per-project write: %s not writable", probe)
+        return None
+    settings_path = os.path.join(claude_dir, "settings.local.json")
+
+    pinned: Set[str] = set(user_pinned or ())
+    tuned = build_env_block(caps, per_server_supported=per_server_supported)
+    managed: Dict[str, str] = {k: v for k, v in tuned.items() if k not in pinned}
+
+    settings = _load_json(settings_path)
+    env_block = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+    env_block = dict(env_block)
+
+    prev_meta = settings.get(SENTINEL_KEY) if isinstance(settings.get(SENTINEL_KEY), dict) else {}
+    prev_managed = prev_meta.get("managed_env_keys") or []
+    for k in prev_managed:
+        if k in pinned:
+            continue
+        if k not in managed and k in env_block:
+            del env_block[k]
+    for k, v in managed.items():
+        env_block[k] = v
+
+    settings["env"] = env_block
+    settings[SENTINEL_KEY] = {
+        "scope": "project",
+        "managed_env_keys": sorted(managed.keys()),
+    }
+    try:
+        os.makedirs(claude_dir, exist_ok=True)
+        _atomic_write_json(settings_path, settings)
+    except OSError as e:
+        log.warning("could not write %s: %s", settings_path, e)
+        return None
+    return managed
+
+
 def write_settings(
     path: str,
     caps: Dict[str, Any],

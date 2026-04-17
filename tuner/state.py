@@ -59,6 +59,13 @@ def empty_state() -> Dict[str, Any]:
         "caps_savings": {},
         "rolling_mean_output": 0.0,
         "rolling_mean_seeded": False,
+        # Phase 3b per-project overrides. Shape:
+        #   {<abs_path>: {"caps": {...}, "cooldowns": {...}, "freezes": {...},
+        #                 "effective_n": float, "last_tune_at": str}}
+        # Projects below MIN_EFFECTIVE_N_PER_PROJECT are not populated; they
+        # inherit user-level caps. Entries for projects no longer in the
+        # corpus are left alone — garbage collection is deferred.
+        "projects": {},
     }
 
 

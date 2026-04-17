@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, List, Optional
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,63 @@ class Event:
 
 
 _TRUNCATION_MARKERS = ("Response truncated", "[truncated]", "…(truncated)")
+
+
+# ─────────────────── project-path decoding ───────────────────
+
+
+def _probe_path(current: str, segments: List[str]) -> Optional[str]:
+    """Recursive filesystem probe. Matches real directory names against the
+    canonical form (spaces collapsed to `-`) of a prefix of `segments`."""
+    if not segments:
+        return current
+    try:
+        entries = [e for e in os.listdir(current)
+                   if os.path.isdir(os.path.join(current, e))]
+    except OSError:
+        return None
+    # Longer matches first: if both "Foo" and "Foo-Bar" exist and the target
+    # is "Foo-Bar-Baz", we want to consume two segments via "Foo-Bar", not one.
+    entries.sort(key=lambda e: len(e.replace(" ", "-")), reverse=True)
+    target = "-".join(segments).lower()
+    for entry in entries:
+        canon = entry.replace(" ", "-").lower()
+        if canon == target:
+            return os.path.join(current, entry)
+        if target.startswith(canon + "-"):
+            consumed = len(canon.split("-"))
+            result = _probe_path(os.path.join(current, entry), segments[consumed:])
+            if result:
+                return result
+    return None
+
+
+def decode_project_path(encoded: str) -> Optional[str]:
+    """Recover the source cwd from Claude Code's encoded transcript dirname.
+
+    Encoding collapses `:`, path separators, and spaces all to `-`, so the
+    decode is inherently lossy. We probe the filesystem to disambiguate.
+    Returns None if no matching directory exists — caller should treat that
+    as "project moved/renamed/deleted" and skip per-project caps (better to
+    miss attribution than to write settings into the wrong project)."""
+    if not encoded:
+        return None
+    if sys.platform == "win32":
+        if "--" not in encoded:
+            return None
+        drive, _, rest = encoded.partition("--")
+        if len(drive) != 1 or not drive.isalpha():
+            return None
+        root = f"{drive.upper()}:\\"
+        segments = rest.split("-") if rest else []
+    else:
+        # POSIX: the leading `/` becomes a single `-`. Any empty segments
+        # from the split (doubled separators) are ignored.
+        if not encoded.startswith("-"):
+            return None
+        root = "/"
+        segments = [s for s in encoded.split("-") if s]
+    return _probe_path(root, segments)
 
 
 def _flatten_content(content: Any) -> str:

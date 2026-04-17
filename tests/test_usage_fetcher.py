@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from hooks.usage_fetcher import _parse, _validate_usage_entry
+from hooks.usage_fetcher import _parse, _validate_usage_entry, burn_pct_per_hour
 
 
 def test_validate_usage_entry_accepts_well_formed():
@@ -68,3 +68,51 @@ def test_parse_both_windows_valid():
     assert out["week_pct_left"] == 83
     assert out["week_pct_used"] == 17
     assert out["week_resets_at"] == "T2"
+
+
+# ─────────────── burn_pct_per_hour rollover handling ───────────────
+
+
+def test_burn_pct_ignores_history_before_rollover():
+    """History spanning a quota reset must slice to the post-reset segment,
+    else delta goes negative and clamps to 0."""
+    # Previous window climbed 87→97, rolled over to 0, then climbed 0→11
+    # over 15 minutes (900s) → 11 * 3600 / 900 = 44 %/hr
+    cache = {
+        "history": [
+            {"at": 1000, "sess_used": 87, "week_used": 12},
+            {"at": 1500, "sess_used": 97, "week_used": 12},
+            {"at": 2000, "sess_used": 0, "week_used": 13},   # rollover
+            {"at": 2900, "sess_used": 11, "week_used": 13},
+        ]
+    }
+    rate = burn_pct_per_hour(cache)
+    assert rate is not None
+    assert 40 <= rate <= 50
+
+
+def test_burn_pct_no_rollover_normal_series():
+    """Monotonic series uses full history, returns positive rate."""
+    cache = {
+        "history": [
+            {"at": 0, "sess_used": 10, "week_used": 5},
+            {"at": 1800, "sess_used": 20, "week_used": 5},
+            {"at": 3600, "sess_used": 30, "week_used": 5},
+        ]
+    }
+    rate = burn_pct_per_hour(cache)
+    assert rate is not None
+    assert 19 <= rate <= 21  # ~20 %/hr
+
+
+def test_burn_pct_post_rollover_too_short_returns_none():
+    """If the only post-rollover data spans less than the min window, bail."""
+    cache = {
+        "history": [
+            {"at": 0, "sess_used": 50, "week_used": 5},
+            {"at": 5000, "sess_used": 90, "week_used": 5},
+            {"at": 5060, "sess_used": 0, "week_used": 6},   # reset 60s ago
+            {"at": 5100, "sess_used": 2, "week_used": 6},
+        ]
+    }
+    assert burn_pct_per_hour(cache) is None

@@ -17,10 +17,10 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Set, Tuple
 
-from analyzer.extractors import Event, iter_corpus
+from analyzer.extractors import Event, decode_project_path, iter_corpus
 from tuner import auto_rules
 from tuner.losses import detect_all, detect_user_pinned
-from tuner.settings_writer import FLOORS, merge_into_user_settings
+from tuner.settings_writer import FLOORS, merge_into_user_settings, write_project_settings
 from tuner.savings import attribute_caps_savings
 from tuner.state import empty_state, load_state, save_state
 from tuner.weighting import age_days, compute_cap, confidence, session_weight, weighted_percentile
@@ -43,6 +43,9 @@ DEFAULT_USER_SETTINGS = os.path.expanduser("~/.claude/settings.json")
 DEFAULT_MCP_ALLOW = {"context7", "kontext", "sequential-thinking", "serena", "plugin_context7_context7"}
 
 MIN_EFFECTIVE_N = 200
+# Per-project threshold is half of the global one. Projects below this fall
+# back to user-level caps — no per-project override written.
+MIN_EFFECTIVE_N_PER_PROJECT = 50
 
 
 def _read_mcp_servers(path: str) -> Set[str]:
@@ -89,6 +92,24 @@ def _server_matches(server: str, allow: set[str]) -> bool:
     return any(len(a) >= 4 and a.lower() in low for a in allow)
 
 
+def _empty_bucket() -> Dict[str, Any]:
+    """A fresh stats accumulator matching the shape collect_samples returns."""
+    return {
+        "out_tokens": [],
+        "mcp_sizes": {},
+        "ctx_pcts": [],
+        "pre_cap_ctx_pcts": [],
+        "losses": [],
+    }
+
+
+def _finalize_bucket(b: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp effective_n onto a bucket built by _empty_bucket()."""
+    out = dict(b)
+    out["effective_n"] = sum(w for _, w in b["out_tokens"]) if b["out_tokens"] else 0.0
+    return out
+
+
 def collect_samples(
     corpus_root: str,
     now: datetime | None = None,
@@ -96,17 +117,21 @@ def collect_samples(
     capped_tools: Iterable[str] = (),
     last_tune_at: str | None = None,
 ) -> Dict[str, Any]:
-    """Walk corpus, return weighted samples per setting + per-MCP-server."""
+    """Walk corpus, return weighted samples per setting + per-MCP-server.
+
+    Return dict has the original global fields plus `by_project`:
+        {<absolute_path>: {<same shape as global>, "effective_n": float}}
+    Sessions whose encoded project dir can't be decoded to a real path are
+    included in global aggregates but not attributed to any project.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
-    out_tokens: List[Tuple[float, float]] = []
-    mcp_sizes: Dict[str, List[Tuple[float, float]]] = {}
-    ctx_pcts: List[Tuple[float, float]] = []
-    pre_cap_ctx_pcts: List[Tuple[float, float]] = []
-    all_losses: List[Dict[str, Any]] = []
-
-    name_by_id: Dict[str, str] = {}
-    session_max_ctx: Dict[str, int] = {}
+    global_bucket = _empty_bucket()
+    by_project: Dict[str, Dict[str, Any]] = {}
+    # Cache decodes per encoded dirname — the corpus walk hits many sessions
+    # under the same project dir, and decode_project_path does a filesystem
+    # walk per call. Sentinel "" means "already tried, no match".
+    decode_cache: Dict[str, str] = {}
 
     for path, events in iter_corpus(corpus_root):
         try:
@@ -120,6 +145,28 @@ def collect_samples(
         last_ts = next((e.ts for e in reversed(ev_list) if e.ts), None)
         w = session_weight(age_days(last_ts, now)) if last_ts else 1.0
 
+        # Decode once per encoded project key. fetch_log sessions carry no
+        # project field — they contribute only to global.
+        encoded = next((e.project for e in ev_list if e.project), None)
+        project_bucket: Dict[str, Any] | None = None
+        if encoded:
+            if encoded not in decode_cache:
+                decoded = decode_project_path(encoded)
+                decode_cache[encoded] = decoded or ""
+            decoded = decode_cache[encoded]
+            if decoded:
+                project_bucket = by_project.setdefault(decoded, _empty_bucket())
+
+        def _push_out(v: float) -> None:
+            global_bucket["out_tokens"].append((v, w))
+            if project_bucket is not None:
+                project_bucket["out_tokens"].append((v, w))
+
+        def _push_mcp(server: str, v: float) -> None:
+            global_bucket["mcp_sizes"].setdefault(server, []).append((v, w))
+            if project_bucket is not None:
+                project_bucket["mcp_sizes"].setdefault(server, []).append((v, w))
+
         local_name_by_id: Dict[str, str] = {}
         max_ctx = 0
         for e in ev_list:
@@ -127,7 +174,7 @@ def collect_samples(
                 local_name_by_id[e.tool_use_id] = e.tool_name or ""
             elif e.kind == "assistant_usage":
                 if e.output_tokens > 0:
-                    out_tokens.append((float(e.output_tokens), w))
+                    _push_out(float(e.output_tokens))
                 ctx = e.input_tokens + e.cache_creation_tokens + e.cache_read_tokens
                 if ctx > max_ctx:
                     max_ctx = ctx
@@ -137,38 +184,37 @@ def collect_samples(
                     parts = tname.split("__")
                     server = parts[1] if len(parts) >= 3 else "unknown"
                     if mcp_allow is None or _server_matches(server, mcp_allow):
-                        mcp_sizes.setdefault(server, []).append((float(e.response_size_bytes), w))
+                        _push_mcp(server, float(e.response_size_bytes))
         if max_ctx > 0:
             # treat as % of 200k baseline; use a shorter half-life (7d) for
             # context habits since the user is actively changing compact behavior
-            from tuner.weighting import session_weight as _sw
             age_d = age_days(last_ts, now) if last_ts else 0.0
             ctx_w = 0.5 ** (age_d / 7.0) if age_d > 0 else 1.0
             ctx_w = max(ctx_w, 0.01)
             pct = min(100.0, (max_ctx / 200_000.0) * 100.0)
-            ctx_pcts.append((pct, ctx_w))
+            global_bucket["ctx_pcts"].append((pct, ctx_w))
+            if project_bucket is not None:
+                project_bucket["ctx_pcts"].append((pct, ctx_w))
             # Track pre-cap context for autocompact confound isolation
             if last_tune_at and last_ts:
                 try:
                     tune_dt = datetime.fromisoformat(last_tune_at.replace("Z", "+00:00"))
                     sess_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
                     if sess_dt < tune_dt:
-                        pre_cap_ctx_pcts.append((pct, ctx_w))
+                        global_bucket["pre_cap_ctx_pcts"].append((pct, ctx_w))
+                        if project_bucket is not None:
+                            project_bucket["pre_cap_ctx_pcts"].append((pct, ctx_w))
                 except (ValueError, AttributeError):
                     pass
         # Run loss detectors per-session to avoid cross-session false positives
         session_losses = detect_all(ev_list, capped_tools=capped_tools)
-        all_losses.extend(session_losses)
+        global_bucket["losses"].extend(session_losses)
+        if project_bucket is not None:
+            project_bucket["losses"].extend(session_losses)
 
-    eff_n = sum(w for _, w in out_tokens) if out_tokens else 0.0
-    return {
-        "out_tokens": out_tokens,
-        "mcp_sizes": mcp_sizes,
-        "ctx_pcts": ctx_pcts,
-        "pre_cap_ctx_pcts": pre_cap_ctx_pcts,
-        "losses": all_losses,
-        "effective_n": eff_n,
-    }
+    stats = _finalize_bucket(global_bucket)
+    stats["by_project"] = {p: _finalize_bucket(b) for p, b in by_project.items()}
+    return stats
 
 
 # ─────────────────── pure: compute caps ───────────────────
@@ -320,6 +366,46 @@ def apply_loss_freezes(
     new_state = dict(state)
     new_state["freezes"] = freezes
     return new_state
+
+
+def compute_per_project_caps(
+    state: Dict[str, Any],
+    by_project: Dict[str, Dict[str, Any]],
+    now: datetime | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Per-project cap pass. Returns the updated state["projects"] dict.
+
+    Projects below MIN_EFFECTIVE_N_PER_PROJECT are skipped — their existing
+    entry (if any) is preserved so a temporarily quiet project doesn't lose
+    its prior tuned caps. Each project runs its own hysteresis/cooldown/
+    freeze cycle against its own prior state, inheriting only the global
+    user_pinned list."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    projects_state = dict(state.get("projects") or {})
+    user_pinned = state.get("user_pinned") or []
+    for path, pstats in by_project.items():
+        if pstats.get("effective_n", 0.0) < MIN_EFFECTIVE_N_PER_PROJECT:
+            continue
+        prior = projects_state.get(path) or {}
+        sub_state: Dict[str, Any] = {
+            "caps": prior.get("caps") or {},
+            "cooldowns": prior.get("cooldowns") or {},
+            "freezes": prior.get("freezes") or {},
+            "user_pinned": user_pinned,
+        }
+        sub_state = apply_loss_freezes(sub_state, pstats.get("losses") or [], now=now)
+        sub_state = tick_cooldowns(sub_state)
+        proposed = compute_caps_per_setting(pstats)
+        final, sub_state = apply_hysteresis_cooldown_freeze(sub_state, proposed, now=now)
+        projects_state[path] = {
+            "caps": final,
+            "cooldowns": sub_state.get("cooldowns") or {},
+            "freezes": sub_state.get("freezes") or {},
+            "effective_n": pstats.get("effective_n", 0.0),
+            "last_tune_at": now.isoformat(),
+        }
+    return projects_state
 
 
 def tick_cooldowns(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -527,6 +613,16 @@ def main(argv: List[str] | None = None) -> int:
         # the consumer (see tokenomy_mcp.server.caps_savings).
         state["caps_savings"] = attribute_caps_savings(final, stats)
 
+        # Per-project caps pass (Phase 3b). Runs independently of the global
+        # caps: projects with their own signal (>= MIN_EFFECTIVE_N_PER_PROJECT)
+        # get their own tuned caps written to their local settings.json on
+        # merge. Projects below that threshold inherit user-level caps.
+        by_project = stats.get("by_project") or {}
+        if by_project:
+            state["projects"] = compute_per_project_caps(
+                state, by_project, datetime.now(timezone.utc)
+            )
+
         # Auto-rules: idle-gap analysis, unused MCP, big-file reads.
         # Runs on last 14d of corpus; produces env overlays (auto-applied) and
         # human-reviewed suggestions (written to _suggestions.md).
@@ -562,8 +658,21 @@ def main(argv: List[str] | None = None) -> int:
             user_pinned=user_pinned,
             env_overlays=auto_results["env_overlays"],
         )
+        # Per-project settings writes — one file per tuned project. Failures
+        # are logged inside write_project_settings and do not block the run.
+        projects_written = 0
+        for path, entry in (state.get("projects") or {}).items():
+            caps_for_project = entry.get("caps") or {}
+            if not caps_for_project:
+                continue
+            result = write_project_settings(path, caps_for_project, user_pinned=user_pinned)
+            if result is not None:
+                projects_written += 1
         save_state(applied_path, state)
-        log.info("merged %d env keys into %s; wrote %s", len(merged), args.user_settings, applied_path)
+        log.info(
+            "merged %d env keys into %s; wrote %d project overrides; state -> %s",
+            len(merged), args.user_settings, projects_written, applied_path,
+        )
         return 0
     finally:
         # Always release the SessionStart hook's lock dir, even on crash.

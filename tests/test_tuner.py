@@ -9,10 +9,12 @@ from tuner.state import empty_state
 from tuner.tuner import (
     COOLDOWN_SESSIONS,
     DEFAULT_MCP_ALLOW,
+    MIN_EFFECTIVE_N_PER_PROJECT,
     _read_mcp_servers,
     apply_hysteresis_cooldown_freeze,
     apply_loss_freezes,
     compute_caps_per_setting,
+    compute_per_project_caps,
     configured_mcp_servers,
 )
 
@@ -271,3 +273,188 @@ def test_configured_mcp_servers_falls_back_when_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     # no ~/.claude.json — should return DEFAULT_MCP_ALLOW
     assert configured_mcp_servers() == set(DEFAULT_MCP_ALLOW)
+
+
+# ─────────────── per-project bucketing (Phase 3b) ───────────────
+
+
+def _encoded_dirname(abs_path: str) -> str:
+    """Reverse of decode_project_path: collapse drive/separators/spaces to `-`."""
+    import sys
+    if sys.platform == "win32":
+        drive, rest = abs_path[:1], abs_path[2:]
+        tokens = [t for t in rest.replace("\\", "-").replace(" ", "-").split("-") if t]
+        return f"{drive}--" + "-".join(tokens)
+    tokens = [t for t in abs_path.replace("/", "-").replace(" ", "-").split("-") if t]
+    return "-" + "-".join(tokens)
+
+
+def _write_session(path, events):
+    path.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+
+
+def test_collect_samples_buckets_by_project(tmp_path):
+    """Two projects with distinct sessions → two buckets; totals sum to global."""
+    from tuner.tuner import collect_samples
+
+    projA = tmp_path / "ProjA"
+    projB = tmp_path / "ProjB"
+    projA.mkdir()
+    projB.mkdir()
+
+    corpus_root = tmp_path / "projects"
+    corpus_root.mkdir()
+    (corpus_root / _encoded_dirname(str(projA))).mkdir()
+    (corpus_root / _encoded_dirname(str(projB))).mkdir()
+
+    # One session per project, each with one assistant_usage event
+    _write_session(
+        corpus_root / _encoded_dirname(str(projA)) / "s1.jsonl",
+        [{
+            "type": "assistant",
+            "timestamp": "2026-04-17T10:00:00Z",
+            "sessionId": "sA",
+            "message": {
+                "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 100, "output_tokens": 5000,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            },
+        }],
+    )
+    _write_session(
+        corpus_root / _encoded_dirname(str(projB)) / "s1.jsonl",
+        [{
+            "type": "assistant",
+            "timestamp": "2026-04-17T10:00:00Z",
+            "sessionId": "sB",
+            "message": {
+                "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 100, "output_tokens": 3000,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            },
+        }],
+    )
+
+    now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=timezone.utc)
+    stats = collect_samples(str(corpus_root), now=now)
+
+    assert "by_project" in stats
+    assert set(stats["by_project"].keys()) == {str(projA), str(projB)}
+    # Each bucket has its one output sample
+    assert len(stats["by_project"][str(projA)]["out_tokens"]) == 1
+    assert stats["by_project"][str(projA)]["out_tokens"][0][0] == 5000.0
+    assert len(stats["by_project"][str(projB)]["out_tokens"]) == 1
+    assert stats["by_project"][str(projB)]["out_tokens"][0][0] == 3000.0
+    # Global aggregates the sum of both
+    assert len(stats["out_tokens"]) == 2
+    assert sum(v for v, _ in stats["out_tokens"]) == 8000.0
+
+
+def test_collect_samples_undecodable_project_skipped(tmp_path):
+    """Session under a dirname that can't decode → global only, no bucket."""
+    from tuner.tuner import collect_samples
+
+    corpus_root = tmp_path / "projects"
+    corpus_root.mkdir()
+    # Manufactured encoded name that maps to a non-existent path
+    bogus = corpus_root / "C--Users-nonexistent-nowhere-X"
+    bogus.mkdir()
+    _write_session(
+        bogus / "s1.jsonl",
+        [{
+            "type": "assistant",
+            "timestamp": "2026-04-17T10:00:00Z",
+            "sessionId": "sX",
+            "message": {
+                "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 100, "output_tokens": 9000,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            },
+        }],
+    )
+    now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=timezone.utc)
+    stats = collect_samples(str(corpus_root), now=now)
+    # Global sees it; per-project does not
+    assert len(stats["out_tokens"]) == 1
+    assert stats["by_project"] == {}
+
+
+def test_compute_per_project_caps_skips_thin_projects():
+    """Projects below MIN_EFFECTIVE_N_PER_PROJECT do not produce an entry."""
+    state = empty_state()
+    by_project = {
+        "/fake/thin": {
+            "out_tokens": [(5000.0, 1.0)] * int(MIN_EFFECTIVE_N_PER_PROJECT - 1),
+            "mcp_sizes": {}, "ctx_pcts": [], "pre_cap_ctx_pcts": [], "losses": [],
+            "effective_n": float(MIN_EFFECTIVE_N_PER_PROJECT - 1),
+        }
+    }
+    now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=timezone.utc)
+    result = compute_per_project_caps(state, by_project, now=now)
+    assert result == {}
+
+
+def test_compute_per_project_caps_writes_entry_when_sufficient():
+    """Project at or above threshold → entry with caps and timestamp."""
+    state = empty_state()
+    by_project = {
+        "/fake/healthy": {
+            "out_tokens": [(6000.0, 1.0)] * (MIN_EFFECTIVE_N_PER_PROJECT + 10),
+            "mcp_sizes": {"serena": [(4000.0, 1.0)] * 100},
+            "ctx_pcts": [], "pre_cap_ctx_pcts": [], "losses": [],
+            "effective_n": float(MIN_EFFECTIVE_N_PER_PROJECT + 10),
+        }
+    }
+    now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=timezone.utc)
+    result = compute_per_project_caps(state, by_project, now=now)
+    assert "/fake/healthy" in result
+    entry = result["/fake/healthy"]
+    assert "caps" in entry and entry["caps"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] > 0
+    assert entry["effective_n"] == float(MIN_EFFECTIVE_N_PER_PROJECT + 10)
+    assert entry["last_tune_at"] == now.isoformat()
+
+
+def test_compute_per_project_caps_preserves_prior_thin_entry():
+    """An existing project entry is kept when its new sample count is thin."""
+    state = empty_state()
+    state["projects"] = {
+        "/fake/was-healthy": {
+            "caps": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 7500},
+            "cooldowns": {}, "freezes": {},
+            "effective_n": 100.0, "last_tune_at": "2026-04-01T00:00:00+00:00",
+        }
+    }
+    by_project = {
+        "/fake/was-healthy": {
+            "out_tokens": [(5000.0, 1.0)] * 10,  # thin today
+            "mcp_sizes": {}, "ctx_pcts": [], "pre_cap_ctx_pcts": [], "losses": [],
+            "effective_n": 10.0,
+        }
+    }
+    now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=timezone.utc)
+    result = compute_per_project_caps(state, by_project, now=now)
+    # Prior entry untouched
+    assert result["/fake/was-healthy"]["caps"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == 7500
+    assert result["/fake/was-healthy"]["last_tune_at"] == "2026-04-01T00:00:00+00:00"
+
+
+def test_compute_per_project_caps_respects_user_pinned():
+    """Global user_pinned blocks a cap from being written per-project too."""
+    state = empty_state()
+    state["user_pinned"] = ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+    by_project = {
+        "/fake/healthy": {
+            "out_tokens": [(5000.0, 1.0)] * (MIN_EFFECTIVE_N_PER_PROJECT + 10),
+            "mcp_sizes": {"serena": [(4000.0, 1.0)] * 100},
+            "ctx_pcts": [], "pre_cap_ctx_pcts": [], "losses": [],
+            "effective_n": float(MIN_EFFECTIVE_N_PER_PROJECT + 10),
+        }
+    }
+    now = datetime(2026, 4, 17, 10, 0, 0, tzinfo=timezone.utc)
+    result = compute_per_project_caps(state, by_project, now=now)
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in result["/fake/healthy"]["caps"]
+    # But MAX_MCP_OUTPUT_TOKENS still written
+    assert "MAX_MCP_OUTPUT_TOKENS" in result["/fake/healthy"]["caps"]
